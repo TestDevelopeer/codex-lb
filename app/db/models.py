@@ -832,6 +832,11 @@ class AutomationJob(Base):
         back_populates="job",
         cascade="all, delete-orphan",
     )
+    run_cycles: Mapped[list["AutomationRunCycle"]] = relationship(
+        "AutomationRunCycle",
+        back_populates="job",
+        cascade="all, delete-orphan",
+    )
 
 
 class AutomationJobAccount(Base):
@@ -885,6 +890,45 @@ class AutomationRun(Base):
 
     job: Mapped[AutomationJob] = relationship("AutomationJob", back_populates="runs")
     account: Mapped[Account | None] = relationship("Account")
+
+
+class AutomationRunCycle(Base):
+    __tablename__ = "automation_run_cycles"
+
+    cycle_key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("automation_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    trigger: Mapped[str] = mapped_column(String(16), nullable=False)
+    cycle_expected_accounts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    cycle_window_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    job: Mapped[AutomationJob] = relationship("AutomationJob", back_populates="run_cycles")
+    cycle_accounts: Mapped[list["AutomationRunCycleAccount"]] = relationship(
+        "AutomationRunCycleAccount",
+        back_populates="cycle",
+        cascade="all, delete-orphan",
+    )
+
+
+class AutomationRunCycleAccount(Base):
+    __tablename__ = "automation_run_cycle_accounts"
+    __table_args__ = (UniqueConstraint("cycle_key", "position", name="uq_automation_run_cycle_accounts_position"),)
+
+    cycle_key: Mapped[str] = mapped_column(
+        String(160),
+        ForeignKey("automation_run_cycles.cycle_key", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    cycle: Mapped[AutomationRunCycle] = relationship("AutomationRunCycle", back_populates="cycle_accounts")
 
 
 class RateLimitAttempt(Base):

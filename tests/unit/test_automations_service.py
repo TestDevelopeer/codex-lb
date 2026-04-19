@@ -6,7 +6,9 @@ import pytest
 
 from app.modules.automations.service import (
     AutomationValidationError,
+    _pick_dispatch_offsets_seconds,
     _resolve_effective_status,
+    _scheduled_slot_key,
     compute_latest_due_slot_utc,
     compute_next_run_utc,
     normalize_schedule_days,
@@ -129,3 +131,25 @@ def test_resolve_effective_status_stays_running_when_accounts_are_still_running(
         window_end_utc=now_utc - timedelta(seconds=1),
     )
     assert status == "running"
+
+
+def test_scheduled_slot_key_depends_on_due_slot_and_account_only() -> None:
+    due_slot = datetime(2026, 4, 19, 3, 0, 0)
+    account_id = "acc-1"
+    first = _scheduled_slot_key("job-1", account_id=account_id, due_slot=due_slot)
+    second = _scheduled_slot_key("job-1", account_id=account_id, due_slot=due_slot)
+    different_slot = _scheduled_slot_key("job-1", account_id=account_id, due_slot=due_slot + timedelta(days=1))
+    assert first == second
+    assert first != different_slot
+
+
+def test_pick_dispatch_offsets_seconds_always_includes_zero_anchor() -> None:
+    offsets = _pick_dispatch_offsets_seconds(
+        job_id="job-1",
+        due_slot=datetime(2026, 4, 19, 3, 0, 0),
+        account_count=4,
+        threshold_minutes=5,
+    )
+    assert len(offsets) == 4
+    assert 0 in offsets
+    assert len(set(offsets)) == 4

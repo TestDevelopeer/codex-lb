@@ -10,7 +10,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import Account, AutomationJob, AutomationJobAccount, AutomationRun
+from app.db.models import (
+    Account,
+    AutomationJob,
+    AutomationJobAccount,
+    AutomationRun,
+    AutomationRunCycle,
+    AutomationRunCycleAccount,
+)
 
 DEFAULT_AUTOMATION_SCHEDULE_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
@@ -54,6 +61,24 @@ class AutomationJobRecord:
     account_ids: list[str]
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationRunCycleAccountRecord:
+    account_id: str
+    position: int
+    scheduled_for: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationRunCycleRecord:
+    cycle_key: str
+    job_id: str
+    trigger: str
+    cycle_expected_accounts: int
+    cycle_window_end: datetime | None
+    accounts: list[AutomationRunCycleAccountRecord]
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,6 +374,54 @@ class AutomationsRepository:
         await self._session.refresh(run)
         return self._run_from_model(run)
 
+    async def get_run_cycle(self, *, cycle_key: str) -> AutomationRunCycleRecord | None:
+        result = await self._session.execute(
+            select(AutomationRunCycle)
+            .where(AutomationRunCycle.cycle_key == cycle_key)
+            .options(selectinload(AutomationRunCycle.cycle_accounts))
+            .limit(1)
+        )
+        cycle = result.scalar_one_or_none()
+        if cycle is None:
+            return None
+        return self._run_cycle_from_model(cycle)
+
+    async def create_run_cycle(
+        self,
+        *,
+        cycle_key: str,
+        job_id: str,
+        trigger: str,
+        cycle_expected_accounts: int,
+        cycle_window_end: datetime | None,
+        accounts: Sequence[tuple[str, datetime]],
+    ) -> AutomationRunCycleRecord:
+        cycle = AutomationRunCycle(
+            cycle_key=cycle_key,
+            job_id=job_id,
+            trigger=trigger,
+            cycle_expected_accounts=cycle_expected_accounts,
+            cycle_window_end=cycle_window_end,
+        )
+        cycle.cycle_accounts = [
+            AutomationRunCycleAccount(
+                cycle_key=cycle_key,
+                account_id=account_id,
+                position=index,
+                scheduled_for=scheduled_for,
+            )
+            for index, (account_id, scheduled_for) in enumerate(accounts)
+        ]
+        self._session.add(cycle)
+        try:
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+        stored_cycle = await self.get_run_cycle(cycle_key=cycle_key)
+        if stored_cycle is None:
+            raise LookupError(f"Automation run cycle not found: {cycle_key}")
+        return stored_cycle
+
     async def complete_run(
         self,
         run_id: str,
@@ -398,28 +471,6 @@ class AutomationsRepository:
             return None
         run, job_name, model, reasoning_effort = row
         return self._run_from_model(run, job_name=job_name, model=model, reasoning_effort=reasoning_effort)
-
-    async def list_runs_for_cycle_window(
-        self,
-        *,
-        job_id: str,
-        trigger: str,
-        scheduled_from: datetime,
-        scheduled_to: datetime,
-    ) -> list[AutomationRunRecord]:
-        result = await self._session.execute(
-            select(AutomationRun, AutomationJob.name, AutomationJob.model, AutomationJob.reasoning_effort)
-            .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
-            .where(AutomationRun.job_id == job_id)
-            .where(AutomationRun.trigger == trigger)
-            .where(AutomationRun.scheduled_for >= scheduled_from)
-            .where(AutomationRun.scheduled_for <= scheduled_to)
-            .order_by(AutomationRun.started_at.desc(), AutomationRun.id.desc())
-        )
-        return [
-            self._run_from_model(run, job_name=job_name, model=model, reasoning_effort=reasoning_effort)
-            for run, job_name, model, reasoning_effort in result.all()
-        ]
 
     async def list_runs_for_cycle_key(self, *, cycle_key: str) -> list[AutomationRunRecord]:
         result = await self._session.execute(
@@ -848,6 +899,26 @@ class AutomationsRepository:
             error_code=run.error_code,
             error_message=run.error_message,
             attempt_count=run.attempt_count,
+        )
+
+    @staticmethod
+    def _run_cycle_from_model(cycle: AutomationRunCycle) -> AutomationRunCycleRecord:
+        cycle_accounts = sorted(cycle.cycle_accounts, key=lambda entry: (entry.position, entry.account_id))
+        return AutomationRunCycleRecord(
+            cycle_key=cycle.cycle_key,
+            job_id=cycle.job_id,
+            trigger=cycle.trigger,
+            cycle_expected_accounts=cycle.cycle_expected_accounts,
+            cycle_window_end=cycle.cycle_window_end,
+            accounts=[
+                AutomationRunCycleAccountRecord(
+                    account_id=entry.account_id,
+                    position=entry.position,
+                    scheduled_for=entry.scheduled_for,
+                )
+                for entry in cycle_accounts
+            ],
+            created_at=cycle.created_at,
         )
 
     @staticmethod

@@ -137,6 +137,8 @@ New top-level tab: `Automations`
 - Use leader election + atomic claiming for multi-replica safety.
 - Guarantee one execution per `(job_id, scheduled_for)` slot.
 - Store deterministic run claim key per slot (`job_id + slot_key`) to enforce uniqueness.
+- Persist one cycle snapshot (`automation_run_cycles` + `automation_run_cycle_accounts`) before dispatching accounts.
+- Freeze both the eligible account set and each account's planned dispatch time for the lifetime of that cycle.
 - On cold restart, execute at most the latest eligible due slot instead of replaying historical backlog.
 
 ## Safety Notes

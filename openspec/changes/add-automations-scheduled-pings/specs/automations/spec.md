@@ -14,7 +14,8 @@ The system MUST provide dashboard APIs to create, list, update, enable/disable, 
 
 - **WHEN** an admin submits `POST /api/automations` with `accountIds` omitted or empty
 - **THEN** the system persists the job with all-accounts targeting semantics
-- **AND** scheduler execution resolves accounts at run time from currently available active accounts
+- **AND** each manual or scheduled cycle resolves currently eligible accounts exactly once when that cycle starts
+- **AND** later account status changes do not add new accounts into an already created cycle
 
 #### Scenario: Disable job
 
@@ -56,6 +57,7 @@ Daily jobs MUST support explicit weekday selection and optional random dispatch 
 - **WHEN** a job run starts with `thresholdMinutes > 0` and multiple target accounts
 - **THEN** the system assigns randomized per-account offsets within `[0, thresholdMinutes]`
 - **AND** it avoids duplicate offsets when possible within that window
+- **AND** the persisted dispatch plan for that cycle remains unchanged even if the job is edited before all pending accounts run
 
 ### Requirement: Daily schedules execute according to declared timezone
 

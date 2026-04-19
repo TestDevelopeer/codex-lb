@@ -21,7 +21,12 @@ from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.automations.repository import AutomationJobRecord, AutomationRunRecord, AutomationsRepository
+from app.modules.automations.repository import (
+    AutomationJobRecord,
+    AutomationRunCycleRecord,
+    AutomationRunRecord,
+    AutomationsRepository,
+)
 from app.modules.request_logs.repository import RequestLogsRepository
 
 AUTOMATION_SCHEDULE_DAILY = "daily"
@@ -669,15 +674,31 @@ class AutomationsService:
         cycle_id = uuid4().hex
         cycle_key = _manual_cycle_key(job.id, cycle_id)
         account_ids = await self._resolve_job_account_ids_for_dispatch(job)
-        if not account_ids:
+        threshold = max(0, job.schedule_threshold_minutes)
+        cycle_window_end = now + timedelta(minutes=threshold)
+        dispatch_plan = _build_dispatch_plan(
+            job_id=job.id,
+            due_slot=now,
+            account_ids=account_ids,
+            threshold_minutes=threshold,
+        )
+        cycle = await self._repository.create_run_cycle(
+            cycle_key=cycle_key,
+            job_id=job.id,
+            trigger=AUTOMATION_RUN_TRIGGER_MANUAL,
+            cycle_expected_accounts=len(dispatch_plan),
+            cycle_window_end=cycle_window_end,
+            accounts=dispatch_plan,
+        )
+        if not cycle.accounts:
             slot_key = f"manual:{job.id}:{cycle_id}:none"
             claim = await self._repository.claim_run(
                 job_id=job.id,
                 trigger=AUTOMATION_RUN_TRIGGER_MANUAL,
                 slot_key=slot_key,
                 cycle_key=cycle_key,
-                cycle_expected_accounts=0,
-                cycle_window_end=now,
+                cycle_expected_accounts=cycle.cycle_expected_accounts,
+                cycle_window_end=cycle.cycle_window_end,
                 scheduled_for=now,
                 started_at=now,
             )
@@ -685,29 +706,19 @@ class AutomationsService:
                 raise RuntimeError("Failed to claim manual automation run")
             return await self._execute_claimed_run(job, claim)
 
-        threshold = max(0, job.schedule_threshold_minutes)
-        dispatch_plan = _build_dispatch_plan(
-            job_id=job.id,
-            due_slot=now,
-            account_ids=account_ids,
-            threshold_minutes=threshold,
-        )
-        expected_accounts_count = len(dispatch_plan)
-        cycle_window_end = now + timedelta(minutes=threshold)
-
         representative_claim: AutomationRunRecord | None = None
-        for account_id, scheduled_for in dispatch_plan:
-            slot_key = _manual_slot_key(job.id, cycle_id, account_id)
+        for cycle_account in cycle.accounts:
+            slot_key = _manual_slot_key(job.id, cycle_id, cycle_account.account_id)
             claim = await self._repository.claim_run(
                 job_id=job.id,
                 trigger=AUTOMATION_RUN_TRIGGER_MANUAL,
                 slot_key=slot_key,
                 cycle_key=cycle_key,
-                cycle_expected_accounts=expected_accounts_count,
-                cycle_window_end=cycle_window_end,
-                scheduled_for=scheduled_for,
+                cycle_expected_accounts=cycle.cycle_expected_accounts,
+                cycle_window_end=cycle.cycle_window_end,
+                scheduled_for=cycle_account.scheduled_for,
                 started_at=now,
-                account_id=account_id,
+                account_id=cycle_account.account_id,
             )
             if claim is None:
                 continue
@@ -737,32 +748,37 @@ class AutomationsService:
             )
             if due_slot is None:
                 continue
-            dispatch_plan = await self._build_scheduled_dispatch_plan(job, due_slot)
-            cycle_expected_accounts = len(dispatch_plan)
-            cycle_window_end = due_slot + timedelta(minutes=max(0, job.schedule_threshold_minutes))
-            for account_id, scheduled_for in dispatch_plan:
-                if scheduled_for > now:
+            cycle_key = _scheduled_cycle_key(job.id, due_slot)
+            cycle = await self._get_or_create_scheduled_cycle(job=job, due_slot=due_slot)
+            existing_cycle_runs = await self._repository.list_runs_for_cycle_key(cycle_key=cycle_key)
+            existing_cycle_account_ids = {
+                cycle_run.account_id for cycle_run in existing_cycle_runs if cycle_run.account_id is not None
+            }
+            for cycle_account in cycle.accounts:
+                if cycle_account.account_id in existing_cycle_account_ids:
+                    continue
+                if cycle_account.scheduled_for > now:
                     continue
                 slot_key = _scheduled_slot_key(
                     job.id,
-                    scheduled_for,
-                    account_id=account_id,
+                    account_id=cycle_account.account_id,
                     due_slot=due_slot,
                 )
                 claim = await self._repository.claim_run(
                     job_id=job.id,
                     trigger=AUTOMATION_RUN_TRIGGER_SCHEDULED,
                     slot_key=slot_key,
-                    cycle_key=_scheduled_cycle_key(job.id, due_slot),
-                    cycle_expected_accounts=cycle_expected_accounts,
-                    cycle_window_end=cycle_window_end,
-                    scheduled_for=scheduled_for,
+                    cycle_key=cycle_key,
+                    cycle_expected_accounts=cycle.cycle_expected_accounts,
+                    cycle_window_end=cycle.cycle_window_end,
+                    scheduled_for=cycle_account.scheduled_for,
                     started_at=now,
-                    account_id=account_id,
+                    account_id=cycle_account.account_id,
                 )
                 if claim is None:
                     continue
-                await self._execute_claimed_run(job, claim, forced_account_id=account_id)
+                existing_cycle_account_ids.add(cycle_account.account_id)
+                await self._execute_claimed_run(job, claim, forced_account_id=cycle_account.account_id)
                 executed += 1
         return executed
 
@@ -779,6 +795,34 @@ class AutomationsService:
             await self._execute_claimed_run(job, run, forced_account_id=run.account_id)
             executed += 1
         return executed
+
+    async def _get_or_create_scheduled_cycle(
+        self,
+        *,
+        job: AutomationJobRecord,
+        due_slot: datetime,
+    ) -> AutomationRunCycleRecord:
+        cycle_key = _scheduled_cycle_key(job.id, due_slot)
+        existing_cycle = await self._repository.get_run_cycle(cycle_key=cycle_key)
+        if existing_cycle is not None:
+            return existing_cycle
+
+        threshold = max(0, job.schedule_threshold_minutes)
+        account_ids = await self._resolve_job_account_ids_for_dispatch(job)
+        dispatch_plan = _build_dispatch_plan(
+            job_id=job.id,
+            due_slot=due_slot,
+            account_ids=account_ids,
+            threshold_minutes=threshold,
+        )
+        return await self._repository.create_run_cycle(
+            cycle_key=cycle_key,
+            job_id=job.id,
+            trigger=AUTOMATION_RUN_TRIGGER_SCHEDULED,
+            cycle_expected_accounts=len(dispatch_plan),
+            cycle_window_end=due_slot + timedelta(minutes=threshold),
+            accounts=dispatch_plan,
+        )
 
     async def _execute_claimed_run(
         self,
@@ -1012,6 +1056,7 @@ class AutomationsService:
             return cycle_cache[cycle_key]
 
         cycle_runs = await self._repository.list_runs_for_cycle_key(cycle_key=cycle_key)
+        cycle = await self._repository.get_run_cycle(cycle_key=cycle_key)
         latest_run_by_account_id: dict[str, AutomationRunRecord] = {}
         for cycle_run in cycle_runs:
             if not cycle_run.account_id:
@@ -1020,25 +1065,29 @@ class AutomationsService:
                 continue
             latest_run_by_account_id[cycle_run.account_id] = cycle_run
 
-        expected_account_ids: list[str] = []
-        seen_account_ids: set[str] = set()
-        for cycle_run in sorted(
-            cycle_runs,
-            key=lambda entry: (entry.scheduled_for, entry.account_id or "", entry.id),
-        ):
-            account_id = cycle_run.account_id
-            if not account_id:
-                continue
-            if account_id in seen_account_ids:
-                continue
-            seen_account_ids.add(account_id)
-            expected_account_ids.append(account_id)
+        if cycle is not None:
+            expected_account_ids = [entry.account_id for entry in cycle.accounts]
+            scheduled_for_by_account_id = {entry.account_id: entry.scheduled_for for entry in cycle.accounts}
+        else:
+            expected_account_ids = []
+            seen_account_ids: set[str] = set()
+            for cycle_run in sorted(
+                cycle_runs,
+                key=lambda entry: (entry.scheduled_for, entry.account_id or "", entry.id),
+            ):
+                account_id = cycle_run.account_id
+                if not account_id:
+                    continue
+                if account_id in seen_account_ids:
+                    continue
+                seen_account_ids.add(account_id)
+                expected_account_ids.append(account_id)
 
-        if not expected_account_ids and run.account_id:
-            expected_account_ids = [run.account_id]
-        scheduled_for_by_account_id = {
-            account_id: entry.scheduled_for for account_id, entry in latest_run_by_account_id.items()
-        }
+            if not expected_account_ids and run.account_id:
+                expected_account_ids = [run.account_id]
+            scheduled_for_by_account_id = {
+                account_id: entry.scheduled_for for account_id, entry in latest_run_by_account_id.items()
+            }
         expected_set = set(expected_account_ids)
         observed_only = [account_id for account_id in latest_run_by_account_id if account_id not in expected_set]
         all_account_ids = [*expected_account_ids, *observed_only]
@@ -1076,9 +1125,13 @@ class AutomationsService:
                 )
             )
 
-        expected_accounts_hint = max(
-            [entry.cycle_expected_accounts or 0 for entry in cycle_runs],
-            default=run.cycle_expected_accounts or 0,
+        expected_accounts_hint = (
+            cycle.cycle_expected_accounts
+            if cycle is not None
+            else max(
+                [entry.cycle_expected_accounts or 0 for entry in cycle_runs],
+                default=run.cycle_expected_accounts or 0,
+            )
         )
         total_accounts = max(len(all_account_ids), expected_accounts_hint)
         completed_accounts = sum(
@@ -1106,7 +1159,15 @@ class AutomationsService:
             running_count=status_counts["running"],
             fallback_status=run.status,
             now_utc=now_utc,
-            window_end_utc=run.cycle_window_end or run.scheduled_for,
+            window_end_utc=(
+                cycle.cycle_window_end
+                if cycle is not None
+                else max(
+                    [entry.cycle_window_end or entry.scheduled_for for entry in cycle_runs],
+                    default=run.cycle_window_end or run.scheduled_for,
+                )
+            )
+            or run.scheduled_for,
         )
         summary = _AutomationRunCycleSummary(
             cycle_key=cycle_key,
@@ -1140,14 +1201,8 @@ class AutomationsService:
         if cycle_cache is not None and cycle_key in cycle_cache:
             return cycle_cache[cycle_key]
 
-        threshold = max(0, job.schedule_threshold_minutes)
-        window_end = due_slot + timedelta(minutes=threshold)
-        cycle_runs = await self._repository.list_runs_for_cycle_window(
-            job_id=job.id,
-            trigger=AUTOMATION_RUN_TRIGGER_SCHEDULED,
-            scheduled_from=due_slot,
-            scheduled_to=window_end,
-        )
+        cycle = await self._repository.get_run_cycle(cycle_key=cycle_key)
+        cycle_runs = await self._repository.list_runs_for_cycle_key(cycle_key=cycle_key)
 
         latest_run_by_account_id: dict[str, AutomationRunRecord] = {}
         for cycle_run in cycle_runs:
@@ -1157,10 +1212,9 @@ class AutomationsService:
                 continue
             latest_run_by_account_id[cycle_run.account_id] = cycle_run
 
-        if now_utc <= window_end:
-            dispatch_plan = await self._build_scheduled_dispatch_plan(job, due_slot)
-            scheduled_for_by_account_id = {account_id: scheduled_for for account_id, scheduled_for in dispatch_plan}
-            expected_account_ids = list(scheduled_for_by_account_id.keys())
+        if cycle is not None:
+            expected_account_ids = [entry.account_id for entry in cycle.accounts]
+            scheduled_for_by_account_id = {entry.account_id: entry.scheduled_for for entry in cycle.accounts}
         else:
             expected_account_ids = []
             scheduled_for_by_account_id = {}
@@ -1211,12 +1265,21 @@ class AutomationsService:
                 )
             )
 
-        expected_accounts_hint = max(
-            [entry.cycle_expected_accounts or 0 for entry in cycle_runs],
-            default=run.cycle_expected_accounts or 0,
+        expected_accounts_hint = (
+            cycle.cycle_expected_accounts
+            if cycle is not None
+            else max(
+                [entry.cycle_expected_accounts or 0 for entry in cycle_runs],
+                default=run.cycle_expected_accounts or 0,
+            )
         )
         total_accounts = max(len(all_account_ids), expected_accounts_hint)
-        completed_accounts = len(latest_run_by_account_id)
+        completed_accounts = sum(
+            1
+            for account_id in all_account_ids
+            if (entry := latest_run_by_account_id.get(account_id)) is not None
+            and entry.status != AUTOMATION_RUN_STATUS_RUNNING
+        )
         pending_accounts = max(0, total_accounts - completed_accounts)
         status_counts = {
             "success": 0,
@@ -1227,6 +1290,14 @@ class AutomationsService:
         for entry in latest_run_by_account_id.values():
             if entry.status in status_counts:
                 status_counts[entry.status] += 1
+        window_end = (
+            cycle.cycle_window_end
+            if cycle is not None
+            else max(
+                [entry.cycle_window_end or entry.scheduled_for for entry in cycle_runs],
+                default=run.cycle_window_end or run.scheduled_for,
+            )
+        ) or run.scheduled_for
         effective_status = _resolve_effective_status(
             pending_accounts=pending_accounts,
             completed_accounts=completed_accounts,
@@ -1450,21 +1521,6 @@ class AutomationsService:
             account_ids=job.account_ids,
             next_run_at=next_run_at,
             last_run=last_run,
-        )
-
-    async def _build_scheduled_dispatch_plan(
-        self,
-        job: AutomationJobRecord,
-        due_slot: datetime,
-    ) -> list[tuple[str, datetime]]:
-        account_ids = await self._resolve_job_account_ids_for_dispatch(job)
-        if not account_ids:
-            return []
-        return _build_dispatch_plan(
-            job_id=job.id,
-            due_slot=due_slot,
-            account_ids=account_ids,
-            threshold_minutes=job.schedule_threshold_minutes,
         )
 
     async def _resolve_job_account_ids_for_dispatch(self, job: AutomationJobRecord) -> list[str]:
@@ -1701,31 +1757,39 @@ def _pick_dispatch_offsets_seconds(
         return [0] * account_count
 
     max_offset_seconds = threshold_minutes * 60
-    available_offsets = list(range(1, max_offset_seconds + 1))
+    available_non_zero_offsets = list(range(1, max_offset_seconds + 1))
     seed = f"{job_id}:{due_slot.isoformat()}"
     rng = random.Random(seed)
 
-    if account_count <= len(available_offsets):
-        return rng.sample(available_offsets, account_count)
+    if account_count == 1:
+        return [0]
 
-    offsets = available_offsets.copy()
+    requested_non_zero_offsets = account_count - 1
+    if requested_non_zero_offsets <= len(available_non_zero_offsets):
+        offsets = [0, *rng.sample(available_non_zero_offsets, requested_non_zero_offsets)]
+        rng.shuffle(offsets)
+        return offsets
+
+    offsets = [0, *available_non_zero_offsets]
     rng.shuffle(offsets)
-    for _ in range(account_count - len(available_offsets)):
-        offsets.append(rng.choice(available_offsets))
+    for _ in range(requested_non_zero_offsets - len(available_non_zero_offsets)):
+        offsets.append(rng.choice(available_non_zero_offsets))
     rng.shuffle(offsets)
     return offsets
 
 
 def _scheduled_slot_key(
     job_id: str,
-    scheduled_for: datetime,
     *,
     account_id: str | None = None,
     due_slot: datetime | None = None,
 ) -> str:
+    slot_anchor = due_slot
+    if slot_anchor is None:
+        raise ValueError("due_slot is required for scheduled slot keys")
     if account_id is None:
-        return f"scheduled:{job_id}:{scheduled_for.isoformat()}Z"
-    seed = f"{job_id}:{(due_slot or scheduled_for).isoformat()}:{account_id}:{scheduled_for.isoformat()}"
+        return f"scheduled:{job_id}:{slot_anchor.isoformat()}Z"
+    seed = f"{job_id}:{slot_anchor.isoformat()}:{account_id}"
     digest = sha1(seed.encode("utf-8")).hexdigest()[:20]
     return f"scheduled:{job_id}:{digest}"
 

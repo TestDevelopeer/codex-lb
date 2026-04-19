@@ -3,7 +3,7 @@
 We are adding scheduled "ping" automations that execute a configured prompt against a chosen model on selected accounts at a fixed local time (daily schedule).
 
 This is a cross-cutting change across:
-- data model (new jobs/runs tables),
+- data model (new jobs/runs tables + cycle snapshot tables),
 - backend API + scheduler/runtime execution,
 - frontend CRUD and run visibility.
 
@@ -31,12 +31,14 @@ Constraints:
 ### 1) Persist automations in dedicated tables
 
 Decision:
-- add `automation_jobs`, `automation_job_accounts`, `automation_runs`.
+- add `automation_jobs`, `automation_job_accounts`, `automation_runs`,
+- add `automation_run_cycles` and `automation_run_cycle_accounts` to freeze one cycle's eligible accounts and planned dispatch times.
 
 Why:
 - durable schedule ownership and observability require persistent state,
 - ordered account preference is first-class and queryable,
-- slot-level idempotency is enforceable with DB constraints.
+- slot-level idempotency is enforceable with DB constraints,
+- cycle-level snapshots prevent late account reactivation or mid-cycle threshold edits from mutating an already created run plan.
 
 Alternative considered:
 - in-memory scheduler config.
@@ -112,12 +114,13 @@ Rejected due to scope growth and degraded task-focused UX.
 - [Scheduler drift / delayed trigger due to polling interval] -> keep interval short and compute due-slot deterministically per timezone.
 - [Race during leadership switch] -> rely on DB unique slot claims to make duplicates harmless.
 - [Account list update can violate unique position in ORM flush ordering] -> use explicit delete+flush+reinsert strategy.
+- [Cycle composition mutates while scheduler keeps polling] -> persist cycle snapshots before claiming per-account runs.
 - [Timezone/DST edge ambiguity] -> normalize `HH:MM`, validate timezone names, and cover DST in unit tests.
 - [Operational noise from non-critical frontend warnings] -> keep warnings visible but non-blocking; enforce test pass gates.
 
 ## Migration Plan
 
-1. Apply Alembic migration creating automation tables and indexes.
+1. Apply Alembic migration creating automation tables, indexes, and cycle snapshot tables.
 2. Deploy backend with API + scheduler (enabled by config).
 3. Deploy frontend with `Automations` route/navigation.
 4. Verify:
