@@ -1065,7 +1065,11 @@ async def test_grouped_scheduled_runs_keep_cycle_order_when_later_account_starts
     grouped_items = grouped_response.json()["items"]
     assert len(grouped_items) == 2
     assert grouped_items[0]["cycleKey"] == second_cycle.cycle_key
+    assert grouped_items[0]["startedAt"] == second_now.isoformat() + "Z"
+    assert grouped_items[0]["scheduledFor"] == second_now.isoformat() + "Z"
     assert grouped_items[1]["cycleKey"] == first_cycle.cycle_key
+    assert grouped_items[1]["startedAt"] == first_now.isoformat() + "Z"
+    assert grouped_items[1]["scheduledFor"] == first_now.isoformat() + "Z"
 
 
 @pytest.mark.asyncio

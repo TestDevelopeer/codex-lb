@@ -1490,6 +1490,10 @@ class AutomationsService:
                 default=run.cycle_window_end or run.scheduled_for,
             )
         ) or run.scheduled_for
+        cycle_started_at = min(
+            scheduled_for_by_account_id.values(),
+            default=min((entry.scheduled_for for entry in cycle_runs), default=run.scheduled_for),
+        )
         effective_status = _resolve_effective_status(
             pending_accounts=pending_accounts,
             completed_accounts=completed_accounts,
@@ -1505,7 +1509,7 @@ class AutomationsService:
         error_code, error_message = _resolve_cycle_error_summary(account_states)
         summary = _AutomationRunCycleSummary(
             cycle_key=cycle_key,
-            cycle_started_at=max((entry.started_at for entry in cycle_runs), default=run.started_at),
+            cycle_started_at=cycle_started_at,
             cycle_finished_at=cycle_finished_at,
             effective_status=effective_status,
             total_accounts=total_accounts,
@@ -1822,9 +1826,7 @@ class AutomationsService:
         summary: _AutomationRunCycleSummary | None = None,
         apply_cycle_terminal_overrides: bool = False,
     ) -> AutomationRunData:
-        cycle_started_at = (
-            summary.cycle_started_at if summary is not None and run.trigger == AUTOMATION_RUN_TRIGGER_MANUAL else None
-        )
+        cycle_started_at = summary.cycle_started_at if summary is not None else None
         cycle_finished_at = (
             summary.cycle_finished_at if summary is not None and apply_cycle_terminal_overrides else None
         )
