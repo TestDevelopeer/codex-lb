@@ -723,7 +723,7 @@ class AutomationsService:
                 representative_claim = claim
         if representative_claim is not None:
             if not has_delayed_dispatches:
-                await self._run_due_manual_runs(now_utc=now)
+                await self._run_due_manual_runs(now_utc=now, cycle_key=cycle_key)
             representative_run = await self._repository.get_run(representative_claim.id)
             if representative_run is None:
                 representative_run = representative_claim
@@ -849,11 +849,12 @@ class AutomationsService:
             executed += 1
         return executed
 
-    async def _run_due_manual_runs(self, *, now_utc: datetime) -> int:
+    async def _run_due_manual_runs(self, *, now_utc: datetime, cycle_key: str | None = None) -> int:
         stale_started_before = now_utc - timedelta(seconds=_manual_run_execution_claim_timeout_seconds())
         due_runs = await self._repository.list_due_manual_runs(
             now_utc=now_utc,
             stale_started_before=stale_started_before,
+            cycle_key=cycle_key,
         )
         if not due_runs:
             return 0

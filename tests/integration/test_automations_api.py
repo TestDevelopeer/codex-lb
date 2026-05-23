@@ -664,13 +664,58 @@ async def test_automations_run_now_fails_over_to_next_account(async_client, monk
 
 @pytest.mark.asyncio
 async def test_automations_run_now_all_accounts_executes_all_accounts(async_client, monkeypatch):
-    accounts = await _create_accounts("auto-manual-all-a", "auto-manual-all-b", "auto-manual-all-c")
+    accounts = await _create_accounts(
+        "auto-manual-all-a",
+        "auto-manual-all-b",
+        "auto-manual-all-c",
+        "auto-manual-unrelated",
+    )
     started_at = utcnow()
+    unrelated_scheduled_for = started_at - timedelta(seconds=5)
 
     async def _fake_compact(*_args, **_kwargs):
         return SimpleNamespace()
 
     monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        unrelated_job = await automations_repository.create_job(
+            name="Unrelated manual due job",
+            enabled=False,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time="05:00",
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[accounts[3].id],
+        )
+        unrelated_cycle_id = "unrelated"
+        unrelated_cycle_key = f"manual:{unrelated_job.id}:{unrelated_cycle_id}"
+        unrelated_cycle = await automations_repository.create_run_cycle(
+            cycle_key=unrelated_cycle_key,
+            job_id=unrelated_job.id,
+            trigger="manual",
+            cycle_expected_accounts=1,
+            cycle_window_end=unrelated_scheduled_for,
+            accounts=[(accounts[3].id, unrelated_scheduled_for)],
+        )
+        unrelated_run = await automations_repository.claim_run(
+            job_id=unrelated_job.id,
+            trigger="manual",
+            slot_key=_manual_slot_key(unrelated_job.id, unrelated_cycle_id, accounts[3].id),
+            cycle_key=unrelated_cycle.cycle_key,
+            cycle_expected_accounts=unrelated_cycle.cycle_expected_accounts,
+            cycle_window_end=unrelated_cycle.cycle_window_end,
+            scheduled_for=unrelated_scheduled_for,
+            started_at=unrelated_scheduled_for,
+            account_id=accounts[3].id,
+        )
+        assert unrelated_run is not None
 
     create_response = await async_client.post(
         "/api/automations",
@@ -685,7 +730,7 @@ async def test_automations_run_now_all_accounts_executes_all_accounts(async_clie
             },
             "model": "gpt-5.3-codex",
             "prompt": "ping",
-            "accountIds": [],
+            "accountIds": [account.id for account in accounts[:3]],
         },
     )
     assert create_response.status_code == 200
@@ -699,8 +744,17 @@ async def test_automations_run_now_all_accounts_executes_all_accounts(async_clie
     assert run_payload["completedAccounts"] == 3
     assert run_payload["pendingAccounts"] == 0
 
+    async with SessionLocal() as session:
+        request_logs_repository = RequestLogsRepository(session)
+        recent_logs, _ = await request_logs_repository.list_recent(limit=200, since=started_at)
+        observed_after_run_now = {
+            log.account_id for log in recent_logs if log.transport == "automation" and log.model == "gpt-5.3-codex"
+        }
+        assert {account.id for account in accounts[:3]}.issubset(observed_after_run_now)
+        assert accounts[3].id not in observed_after_run_now
+
     executed = await _run_due_jobs(now_utc=utcnow() + timedelta(seconds=5))
-    assert executed == 0
+    assert executed == 1
 
     async with SessionLocal() as session:
         request_logs_repository = RequestLogsRepository(session)
@@ -708,8 +762,9 @@ async def test_automations_run_now_all_accounts_executes_all_accounts(async_clie
         observed = {
             log.account_id for log in recent_logs if log.transport == "automation" and log.model == "gpt-5.3-codex"
         }
-        expected = {account.id for account in accounts}
+        expected = {account.id for account in accounts[:3]}
         assert expected.issubset(observed)
+        assert accounts[3].id in observed
 
     runs_response = await async_client.get("/api/automations/runs?trigger=manual&limit=25&offset=0")
     assert runs_response.status_code == 200

@@ -714,9 +714,10 @@ class AutomationsRepository:
         *,
         now_utc: datetime,
         stale_started_before: datetime,
+        cycle_key: str | None = None,
         limit: int = 500,
     ) -> list[AutomationRunRecord]:
-        result = await self._session.execute(
+        stmt = (
             select(AutomationRun, AutomationJob.name, AutomationJob.model, AutomationJob.reasoning_effort)
             .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
             .where(AutomationRun.trigger == "manual")
@@ -732,6 +733,9 @@ class AutomationsRepository:
             .order_by(AutomationRun.scheduled_for.asc(), AutomationRun.started_at.asc(), AutomationRun.id.asc())
             .limit(limit)
         )
+        if cycle_key is not None:
+            stmt = stmt.where(AutomationRun.cycle_key == cycle_key)
+        result = await self._session.execute(stmt)
         return [
             self._run_from_model(run, job_name=job_name, model=model, reasoning_effort=reasoning_effort)
             for run, job_name, model, reasoning_effort in result.all()
