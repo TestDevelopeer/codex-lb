@@ -373,7 +373,7 @@ class LimitWarmupService:
                         error_message=(
                             "Limit warm-up cancelled after another warm-up completion failed"
                             if isinstance(drained_result, asyncio.CancelledError)
-                            else _truncate(str(drained_result))
+                            else (_truncate(str(drained_result)) or "Limit warm-up send failed")
                         ),
                     )
 
