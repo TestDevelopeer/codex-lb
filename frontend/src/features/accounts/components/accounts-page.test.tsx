@@ -51,6 +51,7 @@ function account(overrides: Partial<AccountSummary>): AccountSummary {
     planType: "plus",
     status: "active",
     additionalQuotas: [],
+    limitWarmupEnabled: false,
     ...overrides,
   };
 }

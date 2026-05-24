@@ -1,7 +1,7 @@
 """add account security work authorization flag
 
 Revision ID: 20260521_000000_add_account_security_work_authorized
-Revises: 20260520_010000_add_request_logs_api_key_account_index
+Revises: 20260513_000000_add_accounts_alias
 Create Date: 2026-05-21
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260521_000000_add_account_security_work_authorized"
-down_revision = "20260520_010000_add_request_logs_api_key_account_index"
+down_revision = "20260513_000000_add_accounts_alias"
 branch_labels = None
 depends_on = None
 
