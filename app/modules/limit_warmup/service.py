@@ -215,7 +215,10 @@ class StreamingLimitWarmupSender:
         if self._accounts_repo_factory is None:
             return await self._auth_manager.ensure_fresh(account)
         async with self._accounts_repo_factory() as accounts_repo:
-            return await AuthManager(accounts_repo).ensure_fresh(account)
+            return await AuthManager(
+                accounts_repo,
+                refresh_repo_factory=self._accounts_repo_factory,
+            ).ensure_fresh(account)
 
 
 class LimitWarmupService:
