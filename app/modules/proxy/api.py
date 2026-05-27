@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -50,7 +51,13 @@ from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_public_contract_error_total
 from app.core.middleware.api_firewall import _parse_trusted_proxy_networks, resolve_connection_client_ip
 from app.core.openai.chat_requests import ChatCompletionsRequest
-from app.core.openai.chat_responses import ChatCompletionResult, collect_chat_completion, stream_chat_chunks
+from app.core.openai.chat_responses import (
+    ChatCompletion,
+    ChatCompletionResult,
+    ChatCompletionUsage,
+    collect_chat_completion,
+    stream_chat_chunks,
+)
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.images import V1ImageResponse, V1ImagesEditsForm, V1ImagesGenerationsRequest
 from app.core.openai.model_registry import UpstreamModel, get_model_registry, is_public_model
@@ -204,6 +211,9 @@ _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 2.0
+_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 2.0
+_CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 15.0
+_CURSOR_CONTEXT_LIMIT_SYNTHETIC_USAGE_TOKENS: Final[int] = 1_000_000
 _V1_MAX_OUTPUT_TOKEN_OVERRIDES: Final[dict[str, int]] = {
     "gpt-5.4": 128_000,
     "gpt-5.5": 128_000,
@@ -1619,6 +1629,16 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
                 created=created,
                 owned_by="codex-lb",
                 metadata=_to_model_metadata(model),
+                api_types=["chat_completions"],
+                capabilities=_v1_model_capabilities(model),
+                context_length=_v1_input_context_window(model),
+                contextLength=_v1_input_context_window(model),
+                max_output_tokens=_v1_max_output_tokens(model),
+                maxOutputTokens=_v1_max_output_tokens(model),
+                supports_reasoning=_v1_supports_reasoning(model),
+                supportsReasoning=_v1_supports_reasoning(model),
+                supports_vision=_v1_supports_vision(model),
+                supportsVision=_v1_supports_vision(model),
             )
         )
     await _release_reservation(reservation)
@@ -1716,6 +1736,27 @@ def _v1_max_output_tokens(model: UpstreamModel) -> int | None:
     return _V1_MAX_OUTPUT_TOKEN_OVERRIDES.get(model.slug)
 
 
+def _v1_model_capabilities(model: UpstreamModel) -> dict[str, JsonValue]:
+    return {
+        "context_length": _v1_input_context_window(model),
+        "max_output_tokens": _v1_max_output_tokens(model),
+        "supports_reasoning": _v1_supports_reasoning(model),
+        "supports_vision": _v1_supports_vision(model),
+        "supports_tool_use": True,
+        "supports_streaming": True,
+        "input_modalities": list(model.input_modalities),
+        "output_modalities": ["text"],
+    }
+
+
+def _v1_supports_reasoning(model: UpstreamModel) -> bool:
+    return bool(model.supported_reasoning_levels) or model.supports_reasoning_summaries
+
+
+def _v1_supports_vision(model: UpstreamModel) -> bool:
+    return "image" in model.input_modalities
+
+
 def _model_visibility(model: UpstreamModel) -> str:
     visibility = model.raw.get("visibility")
     return visibility if isinstance(visibility, str) else "list"
@@ -1764,6 +1805,7 @@ async def v1_chat_completions(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    cursor_compat_client = _is_cursor_compat_client(request, api_key)
     effective_model = _effective_model_for_api_key(api_key, payload.model)
     validate_model_access(api_key, effective_model)
 
@@ -1808,27 +1850,32 @@ async def v1_chat_completions(
         api_key_reservation=reservation,
         suppress_text_done_events=True,
     )
-    stream, startup_error = await _probe_stream_startup_error(stream, convert_event_errors=True)
+    startup_probe_timeout = (
+        _CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS
+        if cursor_compat_client
+        else _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS
+    )
+    stream, startup_error = await _probe_chat_stream_startup_error(stream, timeout_seconds=startup_probe_timeout)
     if startup_error is not None:
-        cursor_context_limit_error = _cursor_context_length_error_envelope(api_key, startup_error)
-        if cursor_context_limit_error is not None:
-            return _cursor_context_length_chat_response(
-                payload.stream,
-                responses_payload.model,
-                cursor_context_limit_error,
+        if cursor_compat_client and _is_context_length_startup_error(startup_error):
+            return _cursor_context_limit_usage_stream(
+                payload,
                 headers=rate_limit_headers,
             )
         return _stream_startup_error_response(request, startup_error, headers=rate_limit_headers)
     if payload.stream:
         stream_options = payload.stream_options
-        include_usage = bool(stream_options and stream_options.include_usage)
+        include_usage = cursor_compat_client or bool(stream_options and stream_options.include_usage)
+        chat_stream = stream_chat_chunks(
+            _stream_proxy_errors_as_response_failed(stream),
+            model=responses_payload.model,
+            include_usage=include_usage,
+        )
+        if cursor_compat_client:
+            chat_stream = _stream_with_cursor_usage_fallback(chat_stream, payload)
         return StreamingResponse(
             inject_sse_keepalives(
-                stream_chat_chunks(
-                    _stream_proxy_errors_as_response_failed(stream),
-                    model=responses_payload.model,
-                    include_usage=include_usage,
-                ),
+                chat_stream,
                 get_settings().sse_keepalive_interval_seconds,
             ),
             media_type="text/event-stream",
@@ -1854,6 +1901,8 @@ async def v1_chat_completions(
             content=result.model_dump(mode="json", exclude_none=True),
             headers=rate_limit_headers,
         )
+    if cursor_compat_client and isinstance(result, ChatCompletion):
+        _apply_cursor_usage_fallback(result, payload, source="non_stream")
     return JSONResponse(
         content=result.model_dump(mode="json", exclude_none=True),
         status_code=200,
@@ -2252,6 +2301,298 @@ async def _probe_stream_startup_error(
     return _prepend_first(first, stream), None
 
 
+_CHAT_COMPLETIONS_STARTUP_EVENT_TYPES: Final[set[str]] = {
+    "response.created",
+    "response.in_progress",
+}
+
+
+def _is_cursor_compat_client(request: Request, api_key: ApiKeyData | None) -> bool:
+    if api_key is not None and api_key.name.strip().lower() == "cursor":
+        return True
+    user_agent = request.headers.get("user-agent", "")
+    return "cursor" in user_agent.lower()
+
+
+def _is_context_length_startup_error(error: ProxyResponseError | OpenAIErrorEnvelopeModel) -> bool:
+    code, message = _startup_error_details(error)
+    if code == "context_length_exceeded":
+        return True
+    if message is None:
+        return False
+    normalized = message.lower()
+    return (
+        "context window" in normalized
+        or "input token limit exceeded" in normalized
+        or "token limit exceeded" in normalized
+    )
+
+
+def _startup_error_details(error: ProxyResponseError | OpenAIErrorEnvelopeModel) -> tuple[str | None, str | None]:
+    if isinstance(error, ProxyResponseError):
+        return _error_details_from_content(error.payload)
+    return _error_details_from_content(error)
+
+
+def _cursor_context_limit_usage_stream(
+    payload: ChatCompletionsRequest,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> StreamingResponse:
+    """Return a successful empty stream with over-limit usage so Cursor can compact.
+
+    Cursor's custom-provider path wraps provider errors before the agent loop can
+    classify them as its internal InputTokenLimitError. For Cursor only, preserve
+    the original request history and report token usage beyond the advertised
+    model window instead of returning an OpenAI error.
+    """
+    response_id = f"chatcmpl_{time.time_ns()}"
+    created = int(time.time())
+    model = payload.model
+    usage_tokens = _CURSOR_CONTEXT_LIMIT_SYNTHETIC_USAGE_TOKENS
+
+    def sse_data(data: dict[str, JsonValue] | str) -> str:
+        if data == "[DONE]":
+            return "data: [DONE]\n\n"
+        return f"data: {json.dumps(data, separators=(',', ':'))}\n\n"
+
+    async def body() -> AsyncIterator[str]:
+        yield sse_data(
+            {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant"},
+                        "finish_reason": None,
+                    }
+                ],
+            }
+        )
+        yield sse_data(
+            {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": usage_tokens,
+                    "completion_tokens": 0,
+                    "total_tokens": usage_tokens,
+                },
+            }
+        )
+        yield sse_data("[DONE]")
+
+    return StreamingResponse(body(), media_type="text/event-stream", headers=headers)
+
+
+async def _stream_with_cursor_usage_fallback(
+    stream: AsyncIterator[str],
+    payload: ChatCompletionsRequest,
+) -> AsyncIterator[str]:
+    prompt_tokens = _estimate_cursor_prompt_tokens(payload)
+    completion_chars = 0
+    async for line in stream:
+        parsed = _parse_chat_completion_sse(line)
+        if parsed is None:
+            yield line
+            continue
+        completion_chars += _chat_completion_delta_chars(parsed)
+        if _is_terminal_chat_completion_chunk(parsed) and _needs_cursor_usage_fallback(parsed.get("usage")):
+            completion_tokens = max(1, _estimate_tokens_from_chars(completion_chars))
+            parsed["usage"] = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            }
+            logger.info(
+                "cursor_usage_fallback source=stream model=%s prompt_tokens=%s completion_tokens=%s",
+                payload.model,
+                prompt_tokens,
+                completion_tokens,
+            )
+            yield f"data: {json.dumps(parsed, separators=(',', ':'))}\n\n"
+            continue
+        yield line
+
+
+def _is_terminal_chat_completion_chunk(payload: dict[str, JsonValue]) -> bool:
+    choices = payload.get("choices")
+    if choices == []:
+        return True
+    if not isinstance(choices, list):
+        return False
+    for choice in choices:
+        if isinstance(choice, dict) and choice.get("finish_reason") is not None:
+            return True
+    return False
+
+
+def _parse_chat_completion_sse(line: str) -> dict[str, JsonValue] | None:
+    stripped = line.strip()
+    if not stripped.startswith("data:"):
+        return None
+    data = stripped.removeprefix("data:").strip()
+    if data == "[DONE]":
+        return None
+    try:
+        parsed = json.loads(data)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def _needs_cursor_usage_fallback(usage: JsonValue) -> bool:
+    if not isinstance(usage, dict):
+        return True
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    return not isinstance(prompt_tokens, int) or prompt_tokens <= 0 or not isinstance(completion_tokens, int)
+
+
+def _apply_cursor_usage_fallback(
+    result: ChatCompletion,
+    payload: ChatCompletionsRequest,
+    *,
+    source: str,
+) -> None:
+    usage = result.usage.model_dump(mode="json", exclude_none=True) if result.usage is not None else None
+    if not _needs_cursor_usage_fallback(usage):
+        return
+    prompt_tokens = _estimate_cursor_prompt_tokens(payload)
+    completion_tokens = max(1, _estimate_tokens_from_chars(_chat_completion_result_chars(result)))
+    result.usage = ChatCompletionUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
+    logger.info(
+        "cursor_usage_fallback source=%s model=%s prompt_tokens=%s completion_tokens=%s",
+        source,
+        payload.model,
+        prompt_tokens,
+        completion_tokens,
+    )
+
+
+def _estimate_cursor_prompt_tokens(payload: ChatCompletionsRequest) -> int:
+    data = payload.model_dump(mode="json", exclude_none=True)
+    counted: dict[str, JsonValue] = {}
+    for key in ("messages", "input", "instructions", "tools", "tool_choice", "response_format"):
+        value = data.get(key)
+        if value is not None:
+            counted[key] = value
+    message_count = len(data.get("messages", [])) if isinstance(data.get("messages"), list) else 0
+    return max(1, _estimate_tokens_from_chars(_json_text_chars(counted)) + message_count * 4)
+
+
+def _estimate_tokens_from_chars(chars: int) -> int:
+    return (max(0, chars) + 3) // 4
+
+
+def _json_text_chars(value: JsonValue) -> int:
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, list):
+        return sum(_json_text_chars(item) for item in value)
+    if isinstance(value, dict):
+        return sum(_json_text_chars(item) for item in value.values())
+    return 0
+
+
+def _chat_completion_delta_chars(payload: dict[str, JsonValue]) -> int:
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return 0
+    total = 0
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        for key in ("content", "refusal"):
+            value = delta.get(key)
+            if isinstance(value, str):
+                total += len(value)
+        tool_calls = delta.get("tool_calls")
+        if isinstance(tool_calls, list):
+            total += _json_text_chars(tool_calls)
+    return total
+
+
+def _chat_completion_result_chars(result: ChatCompletion) -> int:
+    total = 0
+    for choice in result.choices:
+        message = choice.message
+        if isinstance(message.content, str):
+            total += len(message.content)
+        if isinstance(message.refusal, str):
+            total += len(message.refusal)
+        if message.tool_calls:
+            total += _json_text_chars(
+                [tool_call.model_dump(mode="json", exclude_none=True) for tool_call in message.tool_calls]
+            )
+    return total
+
+
+async def _probe_chat_stream_startup_error(
+    stream: AsyncIterator[str],
+    *,
+    timeout_seconds: float = _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS,
+    max_startup_events: int = 8,
+) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
+    buffered: list[str] = []
+    for _ in range(max_startup_events):
+        first_task = asyncio.create_task(_read_first_stream_item(stream))
+        try:
+            first = await asyncio.wait_for(
+                asyncio.shield(first_task),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            return _prepend_items(buffered, _prepend_first_task(first_task, stream)), None
+        except StopAsyncIteration:
+            return _prepend_items(buffered, _prepend_first(None, stream)), None
+        except ProxyResponseError as exc:
+            return _prepend_items(buffered, _prepend_first(None, stream)), exc
+
+        first_error = _stream_event_error_envelope(first)
+        if first_error is not None:
+            aclose = getattr(stream, "aclose", None)
+            if callable(aclose):
+                await aclose()
+            return _prepend_first(None, stream), first_error
+
+        payload = _parse_sse_payload(first)
+        event_type = payload.get("type") if payload else None
+        buffered.append(first)
+        if event_type in _CHAT_COMPLETIONS_STARTUP_EVENT_TYPES:
+            continue
+        return _prepend_items(buffered, stream), None
+    return _prepend_items(buffered, stream), None
+
+
+async def _prepend_items(items: list[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    for item in items:
+        yield item
+    async for line in stream:
+        yield line
+
+
 async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
     try:
         yield await first_task
@@ -2318,98 +2659,6 @@ def _stream_startup_error_response(
     )
 
 
-def _cursor_context_length_error_envelope(
-    api_key: ApiKeyData | None,
-    error: ProxyResponseError | OpenAIErrorEnvelopeModel,
-) -> OpenAIErrorEnvelopeModel | None:
-    if api_key is None or api_key.name.strip().lower() != "cursor":
-        return None
-    if isinstance(error, ProxyResponseError):
-        envelope = _parse_error_envelope(error.payload)
-        _, envelope = _mask_previous_response_not_found_error(envelope, default_status=error.status_code)
-    else:
-        _, envelope = _mask_previous_response_not_found_error(error)
-    error_value = envelope.error
-    if error_value is None:
-        return None
-    if error_value.code == "context_length_exceeded":
-        return envelope
-    if error_value.type == "context_length_exceeded":
-        return envelope
-    if error_value.message is not None and "context window" in error_value.message.lower():
-        return envelope
-    return None
-
-
-def _cursor_context_length_chat_response(
-    stream: bool | None,
-    model: str,
-    envelope: OpenAIErrorEnvelopeModel,
-    *,
-    headers: Mapping[str, str],
-) -> Response:
-    error = envelope.error
-    message = (
-        error.message
-        if error is not None and error.message
-        else "Your input exceeds the context window of this model. Please adjust your input and try again."
-    )
-    created = int(time.time())
-    if stream:
-        return StreamingResponse(
-            _cursor_context_length_chat_stream(model, message, created),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", **headers},
-        )
-    return JSONResponse(
-        content={
-            "id": "chatcmpl_context_length_exceeded",
-            "object": "chat.completion",
-            "created": created,
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": message},
-                    "finish_reason": "stop",
-                }
-            ],
-        },
-        status_code=200,
-        headers=headers,
-    )
-
-
-async def _cursor_context_length_chat_stream(
-    model: str,
-    message: str,
-    created: int,
-) -> AsyncIterator[str]:
-    content_chunk: JsonObject = {
-        "id": "chatcmpl_context_length_exceeded",
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "delta": {"role": "assistant", "content": message},
-                "finish_reason": None,
-            }
-        ],
-    }
-    stop_chunk: JsonObject = {
-        "id": "chatcmpl_context_length_exceeded",
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-    }
-    yield format_sse_event(content_chunk)
-    yield format_sse_event(stop_chunk)
-    yield "data: [DONE]\n\n"
-
-
 def _stream_event_error_envelope(event_block: str) -> OpenAIErrorEnvelopeModel | None:
     payload = _parse_sse_payload(event_block)
     if payload is None:
@@ -2471,6 +2720,10 @@ def _error_details_from_content(
     if not isinstance(content, Mapping):
         return None, None
     error = content.get("error")
+    if isinstance(error, str):
+        details = content.get("details")
+        message = details.get("detail") if is_json_mapping(details) else None
+        return error, message if isinstance(message, str) else None
     if not is_json_mapping(error):
         return None, None
     error_mapping = error

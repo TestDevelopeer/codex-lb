@@ -67,6 +67,17 @@ async def test_v1_models_list(async_client):
         assert item["object"] == "model"
         assert item["owned_by"] == "codex-lb"
         assert "metadata" in item
+        assert item["api_types"] == ["chat_completions"]
+        assert item["capabilities"]["context_length"] == item["metadata"]["input_context_window"]
+        assert item["capabilities"]["supports_tool_use"] is True
+        assert item["capabilities"]["supports_streaming"] is True
+        assert item["capabilities"]["output_modalities"] == ["text"]
+        assert item["contextLength"] == item["metadata"]["input_context_window"]
+        assert item["context_length"] == item["metadata"]["input_context_window"]
+        assert item["supportsReasoning"] is True
+        assert item["supports_reasoning"] is True
+        assert item["supportsVision"] is True
+        assert item["supports_vision"] is True
 
 
 @pytest.mark.asyncio
@@ -451,6 +462,9 @@ async def test_model_context_window_override(async_client, monkeypatch):
     metadata = v1_entry["metadata"]
     assert metadata["context_window"] == 515000
     assert metadata["input_context_window"] == 272000
+    assert v1_entry["capabilities"]["context_length"] == 272000
+    assert v1_entry["contextLength"] == 272000
+    assert v1_entry["context_length"] == 272000
 
 
 @pytest.mark.asyncio
@@ -494,6 +508,19 @@ async def test_v1_models_reports_backend_context_window(async_client):
         assert metadata["context_window"] == 272_000
         assert metadata["input_context_window"] == 272_000
         assert metadata["max_output_tokens"] == 128_000
+        entry = next(item for item in resp_v1.json()["data"] if item["id"] == slug)
+        assert entry["api_types"] == ["chat_completions"]
+        assert entry["capabilities"]["context_length"] == 272_000
+        assert entry["capabilities"]["max_output_tokens"] == 128_000
+        assert entry["capabilities"]["supports_reasoning"] is True
+        assert entry["capabilities"]["supports_vision"] is True
+        assert entry["capabilities"]["supports_tool_use"] is True
+        assert entry["capabilities"]["supports_streaming"] is True
+        assert entry["capabilities"]["output_modalities"] == ["text"]
+        assert entry["contextLength"] == 272_000
+        assert entry["context_length"] == 272_000
+        assert entry["maxOutputTokens"] == 128_000
+        assert entry["max_output_tokens"] == 128_000
 
     resp_codex = await async_client.get("/backend-api/codex/models")
     assert resp_codex.status_code == 200

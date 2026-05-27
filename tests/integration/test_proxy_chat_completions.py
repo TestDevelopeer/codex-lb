@@ -325,10 +325,12 @@ async def test_v1_chat_completions_stream_returns_json_for_startup_failure(async
     assert response.status_code == 200
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1"}}\n\n'
+        yield 'event: response.in_progress\ndata: {"type":"response.in_progress","response":{"id":"resp_1"}}\n\n'
         yield (
-            'data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":'
+            'event: error\ndata: {"type":"error","error":'
             '{"message":"Your input exceeds the context window of this model.",'
-            '"type":"invalid_request_error","code":"context_length_exceeded","param":"messages"}}}\n\n'
+            '"type":"invalid_request_error","code":"context_length_exceeded","param":"input"}}\n\n'
         )
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
@@ -344,7 +346,47 @@ async def test_v1_chat_completions_stream_returns_json_for_startup_failure(async
     assert resp.status_code == 400
     body = resp.json()
     assert body["error"]["code"] == "context_length_exceeded"
-    assert body["error"]["param"] == "messages"
+    assert body["error"]["param"] == "input"
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_cursor_context_limit_returns_usage_stream(async_client, monkeypatch):
+    email = "chat-startup-cursor-context@example.com"
+    raw_account_id = "acc_chat_startup_cursor_context"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1"}}\n\n'
+        yield 'event: response.in_progress\ndata: {"type":"response.in_progress","response":{"id":"resp_1"}}\n\n'
+        yield (
+            'event: error\ndata: {"type":"error","error":'
+            '{"message":"Input token limit exceeded",'
+            '"type":"invalid_request_error","code":"context_length_exceeded","param":"input"}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "too much context"}],
+        "stream": True,
+    }
+    resp = await async_client.post(
+        "/v1/chat/completions",
+        json=payload,
+        headers={"User-Agent": "Cursor/1.0"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    body = resp.text
+    assert '"prompt_tokens":1000000' in body
+    assert '"total_tokens":1000000' in body
+    assert '"finish_reason":"stop"' in body
+    assert "data: [DONE]" in body
 
 
 @pytest.mark.asyncio
