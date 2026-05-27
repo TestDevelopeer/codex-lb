@@ -421,4 +421,7 @@ async def test_v1_chat_completions_stream_include_usage(async_client, monkeypatc
     assert chunks
     assert all("usage" in chunk for chunk in chunks)
     assert chunks[0]["usage"] is None
+    assert chunks[-2]["choices"][0]["finish_reason"] == "stop"
+    assert chunks[-2]["usage"] is None
+    assert chunks[-1]["choices"] == []
     assert chunks[-1]["usage"]["total_tokens"] == 5

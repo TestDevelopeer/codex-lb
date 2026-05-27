@@ -135,8 +135,8 @@ class ChatCompletionsRequest(BaseModel):
         data.pop("max_completion_tokens", None)
         response_format = data.pop("response_format", None)
         stream_options = data.pop("stream_options", None)
-        tools = _normalize_chat_tools(data.pop("tools", []))
-        tool_choice = _normalize_tool_choice(data.pop("tool_choice", None))
+        raw_tools = data.pop("tools", [])
+        raw_tool_choice = data.pop("tool_choice", None)
         reasoning_effort = data.pop("reasoning_effort", None)
         preserve_instruction_roles = _is_json_object_response_format(response_format)
         if reasoning_effort is not None and "reasoning" not in data:
@@ -156,11 +156,13 @@ class ChatCompletionsRequest(BaseModel):
             # a missing or explicitly empty `messages` field.
             if not isinstance(data.get("instructions"), str):
                 data["instructions"] = ""
-            data["tools"] = tools
-            if tool_choice is not None:
-                data["tool_choice"] = tool_choice
+            data["tools"] = raw_tools
+            if raw_tool_choice is not None:
+                data["tool_choice"] = raw_tool_choice
             return ResponsesRequest.model_validate(data)
 
+        tools = _normalize_chat_tools(raw_tools)
+        tool_choice = _normalize_tool_choice(raw_tool_choice)
         messages = _sanitize_user_messages(messages)
         existing_instructions = data.pop("instructions", "") or ""
         data.pop("input", None)

@@ -56,6 +56,28 @@ def test_chat_endpoint_preserves_responses_input_when_messages_is_empty():
     assert responses.input == input_items
 
 
+def test_chat_endpoint_preserves_responses_shaped_tools():
+    input_items = [{"role": "user", "content": [{"type": "input_text", "text": "Run tool."}]}]
+    tool = {
+        "type": "mcp",
+        "server_label": "filesystem",
+        "server_url": "https://example.com/mcp",
+        "require_approval": "never",
+    }
+    payload = {
+        "model": "gpt-5.2",
+        "input": input_items,
+        "tools": [tool],
+        "tool_choice": {"type": "mcp", "server_label": "filesystem"},
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+
+    assert responses.input == input_items
+    assert responses.tools == [tool]
+    assert responses.tool_choice == {"type": "mcp", "server_label": "filesystem"}
+
+
 def test_chat_messages_accept_responses_style_text_parts():
     payload = {
         "model": "gpt-5.2",
