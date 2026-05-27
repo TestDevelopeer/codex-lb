@@ -24,6 +24,38 @@ def test_chat_messages_to_responses_mapping():
     assert responses.input == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
 
 
+def test_chat_endpoint_accepts_responses_style_input_payload():
+    payload = {
+        "model": "gpt-5.2",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "metadata": {"client": "cursor"},
+        "user": "cursor-user",
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    dumped = responses.to_payload()
+
+    assert responses.instructions == ""
+    assert responses.input == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+    assert "metadata" not in dumped
+    assert "user" not in dumped
+
+
+def test_chat_messages_accept_responses_style_text_parts():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "system", "content": [{"type": "input_text", "text": "sys"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+
+    assert responses.instructions == "sys"
+    assert responses.input == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+
+
 def test_chat_messages_require_objects():
     payload = {"model": "gpt-5.2", "messages": ["hi"]}
     with pytest.raises(ValidationError):

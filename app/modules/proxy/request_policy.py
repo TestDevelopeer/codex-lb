@@ -31,6 +31,16 @@ logger = logging.getLogger(__name__)
 _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS: frozenset[str] = frozenset({"minimal"})
 _DEFAULT_REASONING_EFFORT_FALLBACK = "low"
 
+# Cursor exposes "GPT-5.5 Extra" as a chat-completions model slug, but the
+# ChatGPT/Codex upstream accepts the canonical GPT-5.5 slug with high reasoning
+# rather than a separate `gpt-5.5-extra` model name.
+_UPSTREAM_MODEL_ALIASES: dict[str, str] = {
+    "gpt-5.5-extra": "gpt-5.5",
+}
+_UPSTREAM_MODEL_ALIAS_REASONING_EFFORTS: dict[str, str] = {
+    "gpt-5.5-extra": "high",
+}
+
 # Service tier values codex-lb accepts at the API-key surface but that the
 # ChatGPT/Codex backend rejects with ``Unsupported service_tier: <value>``.
 # Semantically both ``auto`` and ``default`` mean "let upstream pick" -- the
@@ -47,7 +57,8 @@ def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None
     allowed_models = api_key.allowed_models
     if not allowed_models:
         return
-    if model is None or model in allowed_models:
+    effective_model = resolve_model_alias(model)
+    if model is None or model in allowed_models or effective_model in allowed_models:
         return
     raise ProxyModelNotAllowed(f"This API key does not have access to model '{model}'")
 
@@ -56,6 +67,8 @@ def apply_api_key_enforcement(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
 ) -> None:
+    normalize_upstream_model_alias(payload)
+
     if api_key is None:
         normalize_unsupported_reasoning_effort(payload)
         return
@@ -69,6 +82,7 @@ def apply_api_key_enforcement(
             api_key.enforced_model,
         )
         payload.model = api_key.enforced_model
+        normalize_upstream_model_alias(payload)
 
     if api_key.enforced_reasoning_effort is not None:
         requested_effort = payload.reasoning.effort if payload.reasoning else None
@@ -111,6 +125,55 @@ def apply_api_key_enforcement(
                 api_key.enforced_service_tier,
                 effective_service_tier,
             )
+
+
+def resolve_model_alias(model: str | None) -> str | None:
+    if not isinstance(model, str):
+        return model
+    normalized = model.strip().lower()
+    if not normalized:
+        return model
+    return _UPSTREAM_MODEL_ALIASES.get(normalized, model)
+
+
+def normalize_upstream_model_alias(payload: ResponsesRequest | ResponsesCompactRequest) -> None:
+    requested_model = payload.model
+    normalized = requested_model.strip().lower() if isinstance(requested_model, str) else ""
+    if not normalized:
+        return
+
+    canonical_model = _UPSTREAM_MODEL_ALIASES.get(normalized)
+    if canonical_model is None:
+        return
+
+    if payload.model != canonical_model:
+        logger.info(
+            "model_alias_normalized request_id=%s requested_model=%s normalized_model=%s",
+            get_request_id(),
+            payload.model,
+            canonical_model,
+        )
+        payload.model = canonical_model
+
+    alias_effort = _UPSTREAM_MODEL_ALIAS_REASONING_EFFORTS.get(normalized)
+    if alias_effort is None:
+        return
+
+    requested_effort = payload.reasoning.effort if payload.reasoning else None
+    if payload.reasoning is None:
+        payload.reasoning = ResponsesReasoning(effort=alias_effort)
+    else:
+        payload.reasoning.effort = alias_effort
+    if requested_effort != alias_effort:
+        logger.info(
+            "model_alias_reasoning_normalized request_id=%s requested_model=%s "
+            "normalized_model=%s requested_effort=%s normalized_effort=%s",
+            get_request_id(),
+            requested_model,
+            canonical_model,
+            requested_effort,
+            alias_effort,
+        )
 
 
 def normalize_unsupported_reasoning_effort(
