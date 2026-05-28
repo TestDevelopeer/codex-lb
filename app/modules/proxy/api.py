@@ -1624,21 +1624,23 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
         if not is_public_model(model, allowed_models):
             continue
         items.append(
-            ModelListItem(
-                id=slug,
-                created=created,
-                owned_by="codex-lb",
-                metadata=_to_model_metadata(model),
-                api_types=["chat_completions"],
-                capabilities=_v1_model_capabilities(model),
-                context_length=_v1_input_context_window(model),
-                contextLength=_v1_input_context_window(model),
-                max_output_tokens=_v1_max_output_tokens(model),
-                maxOutputTokens=_v1_max_output_tokens(model),
-                supports_reasoning=_v1_supports_reasoning(model),
-                supportsReasoning=_v1_supports_reasoning(model),
-                supports_vision=_v1_supports_vision(model),
-                supportsVision=_v1_supports_vision(model),
+            ModelListItem.model_validate(
+                {
+                    "id": slug,
+                    "created": created,
+                    "owned_by": "codex-lb",
+                    "metadata": _to_model_metadata(model),
+                    "api_types": ["chat_completions"],
+                    "capabilities": _v1_model_capabilities(model),
+                    "context_length": _v1_input_context_window(model),
+                    "contextLength": _v1_input_context_window(model),
+                    "max_output_tokens": _v1_max_output_tokens(model),
+                    "maxOutputTokens": _v1_max_output_tokens(model),
+                    "supports_reasoning": _v1_supports_reasoning(model),
+                    "supportsReasoning": _v1_supports_reasoning(model),
+                    "supports_vision": _v1_supports_vision(model),
+                    "supportsVision": _v1_supports_vision(model),
+                }
             )
         )
     await _release_reservation(reservation)
