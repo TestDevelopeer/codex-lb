@@ -6931,6 +6931,8 @@ class ProxyService:
                 await self._acquire_request_state_response_create_admission(
                     warmup_state,
                     response_create_gate=session.response_create_gate,
+                    account_id=session.account.id,
+                    surface="http_bridge_prewarm",
                 )
                 gate_acquired = True
                 async with session.pending_lock:

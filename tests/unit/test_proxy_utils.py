@@ -16076,6 +16076,31 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "_PREWARM_RESPONSE_TIMEOUT_SECONDS", 0.05)
     reconnect_observations: list[dict[str, object]] = []
+    admission_observations: list[dict[str, object]] = []
+    original_acquire_admission = service._acquire_request_state_response_create_admission
+
+    async def capture_acquire_admission(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        compact: bool = False,
+        account_id: str | None = None,
+        surface: str = "websocket",
+    ) -> None:
+        admission_observations.append(
+            {
+                "request_id": state.request_id,
+                "account_id": account_id,
+                "surface": surface,
+            }
+        )
+        await original_acquire_admission(
+            state,
+            response_create_gate=response_create_gate,
+            compact=compact,
+            account_id=account_id,
+            surface=surface,
+        )
 
     async def fake_reconnect_http_bridge_session(
         reconnect_session: proxy_service._HTTPBridgeSession,
@@ -16094,6 +16119,7 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
         reconnect_session.closed = False
 
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", fake_reconnect_http_bridge_session)
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", capture_acquire_admission)
 
     await asyncio.wait_for(
         service._maybe_prewarm_http_bridge_session(
@@ -16109,6 +16135,16 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
     # warmup events cannot be matched to the next visible request.
     assert session.prewarmed is False
     assert len(reconnect_observations) == 1
+    assert len(admission_observations) == 1
+    prewarm_admission = admission_observations[0]
+    assert admission_observations == [
+        {
+            "request_id": prewarm_admission["request_id"],
+            "account_id": "acc_prewarm_timeout",
+            "surface": "http_bridge_prewarm",
+        }
+    ]
+    assert cast(str, prewarm_admission["request_id"]).startswith("http_prewarm_")
     observation = reconnect_observations[0]
     assert observation["request_id"] == "req_prewarm_timeout"
     assert observation["restart_reader"] is True
