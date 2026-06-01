@@ -257,6 +257,44 @@ async def test_backend_files_finalize_repeated_401_after_refresh_fails_over(asyn
 
 
 @pytest.mark.asyncio
+async def test_backend_files_finalize_pinned_401_does_not_fail_over(async_client, monkeypatch):
+    await _import_account(async_client, "acc_files_finalize_pinned_a", "files-finalize-pinned-a@example.com")
+    await _import_account(async_client, "acc_files_finalize_pinned_b", "files-finalize-pinned-b@example.com")
+    captured_account_ids: list[str | None] = []
+
+    async def fake_create_file(*, payload, headers, access_token, account_id, base_url=None, session=None, **kwargs):
+        return {"file_id": "file_pinned_401", "upload_url": "https://blob.example/sas?token=p"}
+
+    async def fake_finalize_file(*, file_id, headers, access_token, account_id, base_url=None, session=None, **kwargs):
+        del file_id, headers, access_token, base_url, session
+        captured_account_ids.append(account_id)
+        raise FileProxyError(
+            401,
+            {"error": {"message": "token invalidated", "type": "authentication_error", "code": "invalid_api_key"}},
+        )
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        assert timeout_seconds is not None
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_create_file", fake_create_file)
+    monkeypatch.setattr(proxy_module, "core_finalize_file", fake_finalize_file)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    create_response = await async_client.post(
+        "/backend-api/files",
+        json={"file_name": "x.png", "file_size": 1},
+    )
+    assert create_response.status_code == 200
+
+    response = await async_client.post("/backend-api/files/file_pinned_401/uploaded")
+
+    assert response.status_code == 401
+    assert len(captured_account_ids) == 2
+    assert captured_account_ids[0] == captured_account_ids[1]
+
+
+@pytest.mark.asyncio
 async def test_backend_files_finalize_propagates_retry_status(async_client, monkeypatch):
     """Once the finalize loop in the upstream client gives up with a
     final ``retry`` status, we return that payload verbatim so the

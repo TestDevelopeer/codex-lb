@@ -3430,6 +3430,7 @@ class ProxyService:
             api_key=api_key,
             headers=headers,
             preferred_account_id=pinned_account_id,
+            fallback_on_preferred_account_unavailable=pinned_account_id is None,
             invoke=lambda access_token, upstream_account_id, filtered_headers, route, route_trace: core_finalize_file(
                 file_id=file_id,
                 headers=filtered_headers,
@@ -3458,6 +3459,7 @@ class ProxyService:
             Awaitable[dict[str, JsonValue]],
         ],
         preferred_account_id: str | None = None,
+        fallback_on_preferred_account_unavailable: bool = True,
     ) -> tuple[dict[str, JsonValue], str | None]:
         """Shared account-selection / refresh / 401-retry plumbing for `/files` calls.
 
@@ -3497,6 +3499,7 @@ class ProxyService:
                 routing_strategy=routing_strategy,
                 model=None,
                 preferred_account_id=preferred_account_id,
+                fallback_on_preferred_account_unavailable=fallback_on_preferred_account_unavailable,
             )
             account = selection.account
             if not account:
@@ -3627,6 +3630,8 @@ class ProxyService:
                 except ProxyResponseError as retry_exc:
                     await self._handle_proxy_error(account, retry_exc)
                     if retry_exc.status_code == 401:
+                        if not fallback_on_preferred_account_unavailable:
+                            raise
                         selection = await self._select_account_with_budget(
                             deadline,
                             request_id=request_id,
@@ -3637,6 +3642,7 @@ class ProxyService:
                             model=None,
                             preferred_account_id=preferred_account_id,
                             exclude_account_ids={account.id},
+                            fallback_on_preferred_account_unavailable=fallback_on_preferred_account_unavailable,
                         )
                         if selection.account is not None:
                             account = selection.account
@@ -3770,7 +3776,7 @@ class ProxyService:
                             error_type="server_error",
                             downstream_activity=downstream_activity,
                         )
-                        _release_websocket_response_create_gate(request_state, response_create_gate)
+                        await _release_websocket_response_create_gate(request_state, response_create_gate)
                         continue
                     payload = _parse_websocket_payload(text_data)
                     if payload is None:
@@ -3784,7 +3790,7 @@ class ProxyService:
                             error_type="server_error",
                             downstream_activity=downstream_activity,
                         )
-                        _release_websocket_response_create_gate(request_state, response_create_gate)
+                        await _release_websocket_response_create_gate(request_state, response_create_gate)
                         continue
                     async with pending_lock:
                         pending_requests.append(request_state)
@@ -4083,7 +4089,7 @@ class ProxyService:
                             error_param=error_param,
                             downstream_activity=downstream_activity,
                         )
-                        _release_websocket_response_create_gate(request_state, response_create_gate)
+                        await _release_websocket_response_create_gate(request_state, response_create_gate)
                         continue
                     except asyncio.CancelledError:
                         await self._release_websocket_request_state_reservation(request_state)
@@ -4091,7 +4097,7 @@ class ProxyService:
                             async with pending_lock:
                                 if request_state in pending_requests:
                                     pending_requests.remove(request_state)
-                        _release_websocket_response_create_gate(request_state, response_create_gate)
+                        await _release_websocket_response_create_gate(request_state, response_create_gate)
                         raise
                     except Exception:
                         await self._release_websocket_request_state_reservation(request_state)
@@ -4099,7 +4105,7 @@ class ProxyService:
                             async with pending_lock:
                                 if request_state in pending_requests:
                                     pending_requests.remove(request_state)
-                        _release_websocket_response_create_gate(request_state, response_create_gate)
+                        await _release_websocket_response_create_gate(request_state, response_create_gate)
                         raise
 
                 if upstream is None:
@@ -4147,7 +4153,7 @@ class ProxyService:
                             async with pending_lock:
                                 if request_state in pending_requests:
                                     pending_requests.remove(request_state)
-                            _release_websocket_response_create_gate(request_state, response_create_gate)
+                            await _release_websocket_response_create_gate(request_state, response_create_gate)
                         continue
                     account_lease = request_state.websocket_stream_lease
                     request_state.websocket_stream_lease = None
@@ -4205,7 +4211,7 @@ class ProxyService:
                             async with pending_lock:
                                 if request_state in pending_requests:
                                     pending_requests.remove(request_state)
-                            _release_websocket_response_create_gate(request_state, response_create_gate)
+                            await _release_websocket_response_create_gate(request_state, response_create_gate)
                         await self._emit_websocket_terminal_error(
                             websocket,
                             client_send_lock=client_send_lock,
@@ -4282,7 +4288,7 @@ class ProxyService:
             if replay_request_state is not None:
                 await self._release_websocket_request_state_reservation(replay_request_state)
                 replay_request_state.api_key_reservation = None
-                _release_websocket_response_create_gate(replay_request_state, response_create_gate)
+                await _release_websocket_response_create_gate(replay_request_state, response_create_gate)
             client_disconnected = downstream_activity.disconnected
             await self._fail_pending_websocket_requests(
                 account=None if client_disconnected else account,
@@ -4783,7 +4789,7 @@ class ProxyService:
             )
         except BaseException:
             await self._release_request_state_account_response_create_lease(request_state)
-            _release_websocket_response_create_gate(request_state, response_create_gate)
+            await _release_websocket_response_create_gate(request_state, response_create_gate)
             raise
 
     async def _release_request_state_account_response_create_lease(
@@ -7271,7 +7277,10 @@ class ProxyService:
                                     session.pending_requests.remove(warmup_state)
                             self._cancel_request_state_api_key_reservation_heartbeat(warmup_state)
                             if gate_acquired:
-                                _release_websocket_response_create_gate(warmup_state, session.response_create_gate)
+                                await _release_websocket_response_create_gate(
+                                    warmup_state,
+                                    session.response_create_gate,
+                                )
                         return
                     if event_block is None:
                         break
@@ -7325,7 +7334,7 @@ class ProxyService:
             session.queued_request_count = max(0, session.queued_request_count - 1)
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
         if gate_acquired:
-            _release_websocket_response_create_gate(request_state, session.response_create_gate)
+            await _release_websocket_response_create_gate(request_state, session.response_create_gate)
 
     async def _detach_http_bridge_request(
         self,
@@ -7348,7 +7357,7 @@ class ProxyService:
         # _stream_http_bridge_session_events, the terminal event has
         # already been delivered via _pop_terminal_websocket_request_state.
         # A late-arriving event on a nulled queue is a no-op.
-        _release_websocket_response_create_gate(request_state, session.response_create_gate)
+        await _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if not detached:
             return False
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
@@ -8198,7 +8207,7 @@ class ProxyService:
             )
 
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
-            _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
+            await _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
 
         if response_id is not None and matched_request_state is not None and event_type == "response.completed":
             await self._register_http_bridge_previous_response_id(
@@ -8913,7 +8922,7 @@ class ProxyService:
                 request_state = None
 
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
-            _release_websocket_response_create_gate(created_request_state, response_create_gate)
+            await _release_websocket_response_create_gate(created_request_state, response_create_gate)
 
         if len(grouped_previous_response_request_states) > 1:
             upstream_control.reconnect_requested = True
@@ -9270,7 +9279,7 @@ class ProxyService:
         response_service_tier = request_state.service_tier
 
         if request_state.draining_until_terminal:
-            _release_websocket_response_create_gate(request_state, response_create_gate)
+            await _release_websocket_response_create_gate(request_state, response_create_gate)
             await self._release_websocket_reservation(request_state.api_key_reservation)
             request_state.api_key_reservation = None
             return
@@ -9334,7 +9343,7 @@ class ProxyService:
         ):
             settlement.account_health_error = False
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
-        _release_websocket_response_create_gate(request_state, response_create_gate)
+        await _release_websocket_response_create_gate(request_state, response_create_gate)
         await self._settle_stream_api_key_usage(
             api_key,
             request_state.api_key_reservation,
@@ -9463,7 +9472,7 @@ class ProxyService:
         )
         response_create_gate = request_state.response_create_gate
         if response_create_gate is not None:
-            _release_websocket_response_create_gate(request_state, response_create_gate)
+            await _release_websocket_response_create_gate(request_state, response_create_gate)
         async with client_send_lock:
             await websocket.send_text(
                 _serialize_websocket_error_event(_wrapped_websocket_error_event(status_code, payload))
@@ -9569,7 +9578,7 @@ class ProxyService:
                     error_message=request_error_message,
                 )
             if response_create_gate is not None:
-                _release_websocket_response_create_gate(request_state, response_create_gate)
+                await _release_websocket_response_create_gate(request_state, response_create_gate)
             if request_state.event_queue is not None:
                 await request_state.event_queue.put(
                     format_sse_event(
@@ -9651,7 +9660,7 @@ class ProxyService:
         )
         response_create_gate = request_state.response_create_gate
         if response_create_gate is not None:
-            _release_websocket_response_create_gate(request_state, response_create_gate)
+            await _release_websocket_response_create_gate(request_state, response_create_gate)
         try:
             await self._send_downstream_websocket_text(
                 websocket,
@@ -14027,7 +14036,7 @@ def _build_stream_incomplete_terminal_event_for_request(
     return downstream_text, event_block, event, payload, event_type
 
 
-def _release_websocket_response_create_gate(
+async def _release_websocket_response_create_gate(
     request_state: _WebSocketRequestState,
     response_create_gate: asyncio.Semaphore,
 ) -> None:
@@ -14039,7 +14048,7 @@ def _release_websocket_response_create_gate(
         request_state.response_create_admission.release()
         request_state.response_create_admission = None
     if account_response_create_lease is not None and account_response_create_release is not None:
-        asyncio.create_task(account_response_create_release(account_response_create_lease))
+        await account_response_create_release(account_response_create_lease)
     request_state.awaiting_response_created = False
     request_state.response_create_gate = None
     if not request_state.response_create_gate_acquired:

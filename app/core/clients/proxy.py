@@ -2095,7 +2095,6 @@ async def stream_responses(
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = True,
 ) -> AsyncIterator[str]:
-    effective_allow_direct_egress = allow_direct_egress or (route is None and session is not None)
     async with lease_http_session(session) as client_session:
         async for event_block in _stream_responses_with_session(
             payload=payload,
@@ -2109,7 +2108,7 @@ async def stream_responses(
             route=route,
             codex_client=codex_client,
             route_trace=route_trace,
-            allow_direct_egress=effective_allow_direct_egress,
+            allow_direct_egress=allow_direct_egress,
         ):
             yield event_block
 

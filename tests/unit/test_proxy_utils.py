@@ -2210,6 +2210,44 @@ async def test_stream_responses_starts_upstream_timer_after_image_inlining(monke
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_honors_explicit_direct_egress_opt_out(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 1.0
+        stream_idle_timeout_seconds = 1.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 15.0
+        upstream_stream_transport = "http"
+        log_upstream_request_summary = False
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    session = _SseSession(_SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']))
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    with pytest.raises(ValueError, match="allow_direct_egress=True"):
+        _ = [
+            event
+            async for event in proxy_module.stream_responses(
+                payload,
+                headers={},
+                access_token="token",
+                account_id="acc_1",
+                session=cast(proxy_module.aiohttp.ClientSession, session),
+                allow_direct_egress=False,
+            )
+        ]
+
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_archives_http_error_before_raising(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
@@ -14800,12 +14838,65 @@ async def test_response_create_admission_waits_on_session_gate_before_shared_cap
     shared_lease = await service._get_work_admission().acquire_response_create()
     shared_lease.release()
 
-    proxy_service._release_websocket_response_create_gate(first_request, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(first_request, response_create_gate)
     await second_task
-    proxy_service._release_websocket_response_create_gate(second_request, response_create_gate)
+    await proxy_service._release_websocket_response_create_gate(second_request, response_create_gate)
 
     assert second_request.response_create_gate_acquired is False
     assert second_request.response_create_admission is None
+
+
+@pytest.mark.asyncio
+async def test_response_create_gate_waits_for_account_lease_release_before_reopening() -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_release",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    response_create_gate = asyncio.Semaphore(1)
+    await response_create_gate.acquire()
+    request_state.response_create_gate = response_create_gate
+    request_state.response_create_gate_acquired = True
+    request_state.awaiting_response_created = True
+    account_lease = proxy_service.AccountLease(
+        lease_id="lease-response-create",
+        account_id="acc_release",
+        kind="response_create",
+        acquired_at=0.0,
+    )
+    request_state.account_response_create_lease = account_lease
+    release_can_finish = asyncio.Event()
+    release_started = asyncio.Event()
+    released: list[proxy_service.AccountLease | None] = []
+
+    async def release_account_lease(lease: proxy_service.AccountLease | None) -> None:
+        released.append(lease)
+        release_started.set()
+        await release_can_finish.wait()
+
+    request_state.account_response_create_release = release_account_lease
+    release_task = asyncio.create_task(
+        proxy_service._release_websocket_response_create_gate(request_state, response_create_gate)
+    )
+
+    await asyncio.wait_for(release_started.wait(), timeout=1.0)
+    await asyncio.sleep(0)
+
+    assert response_create_gate.locked() is True
+    assert request_state.response_create_gate_acquired is True
+
+    release_can_finish.set()
+    await release_task
+
+    assert response_create_gate.locked() is False
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.response_create_gate is None
+    assert request_state.account_response_create_lease is None
+    assert request_state.account_response_create_release is None
+    assert released == [account_lease]
 
 
 @pytest.mark.asyncio
