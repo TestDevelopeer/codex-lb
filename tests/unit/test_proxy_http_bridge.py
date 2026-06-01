@@ -878,6 +878,97 @@ def test_http_bridge_owner_check_required_enables_sticky_thread_in_gateway_safe_
 
 
 @pytest.mark.asyncio
+async def test_stream_via_http_bridge_soft_prompt_cache_queue_full_reroutes(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": "hello",
+            "prompt_cache_key": "soft-queue-full",
+        }
+    )
+    saturated_session = _make_bridge_session(key_value="soft-queue-full", queued_request_count=8)
+    saturated_session.key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "soft-queue-full", None)
+    reroute_session = _make_bridge_session(key_value="soft-reroute")
+    get_or_create = AsyncMock(side_effect=[saturated_session, reroute_session])
+
+    async def fake_stream_events(
+        session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+        propagate_http_errors: bool,
+        downstream_turn_state: str | None,
+    ):
+        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state
+        if session is saturated_session:
+            raise ProxyResponseError(
+                429,
+                proxy_service.openai_error(
+                    "bridge_queue_full",
+                    "HTTP responses session bridge queue is full",
+                    error_type="rate_limit_error",
+                ),
+            )
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
+
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert get_or_create.await_count == 2
+    reroute_key = get_or_create.await_args_list[1].args[0]
+    assert reroute_key.affinity_kind == "internal_soft_affinity_reroute"
+    assert reroute_key.strength == "soft"
+    assert get_or_create.await_args_list[1].kwargs["previous_response_id"] is None
+    assert "internal_soft_affinity_reroute" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_select_account_with_budget_prefers_durable_account_id_when_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5892,12 +5983,12 @@ async def test_get_or_create_http_bridge_session_inflight_wait_times_out(
         )
 
     assert exc_info.value.status_code == 429
-    assert exc_info.value.payload["error"]["code"] == "proxy_overloaded"
+    assert exc_info.value.payload["error"]["code"] == "capacity_exhausted_active_sessions"
     assert key not in service._http_bridge_inflight_sessions
     with pytest.raises(ProxyResponseError) as future_exc_info:
         await inflight_future
     assert future_exc_info.value.status_code == 429
-    assert future_exc_info.value.payload["error"]["code"] == "proxy_overloaded"
+    assert future_exc_info.value.payload["error"]["code"] == "capacity_exhausted_active_sessions"
 
 
 @pytest.mark.asyncio
@@ -6054,13 +6145,122 @@ async def test_get_or_create_http_bridge_session_capacity_wait_times_out(
         )
 
     assert exc_info.value.status_code == 429
-    assert exc_info.value.payload["error"]["code"] == "proxy_overloaded"
+    assert exc_info.value.payload["error"]["code"] == "capacity_exhausted_active_sessions"
     assert inflight_key not in service._http_bridge_inflight_sessions
     with pytest.raises(ProxyResponseError) as future_exc_info:
         await inflight_future
     assert future_exc_info.value.status_code == 429
-    assert future_exc_info.value.payload["error"]["code"] == "proxy_overloaded"
+    assert future_exc_info.value.payload["error"]["code"] == "capacity_exhausted_active_sessions"
     create_http_bridge_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_immediate_capacity_exhaustion_is_local_overload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    existing_key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-capacity-full", None)
+    existing = _make_bridge_session(key_value="sid-capacity-full", queued_request_count=1)
+    service._http_bridge_sessions[existing_key] = existing
+
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", AsyncMock())
+    monkeypatch.setattr(service, "_http_bridge_pending_count", AsyncMock(return_value=1))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_should_wait_for_registration", AsyncMock(return_value=False))
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ("instance-a",))),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._get_or_create_http_bridge_session(
+            proxy_service._HTTPBridgeSessionKey("session_header", "sid-capacity-new", None),
+            headers={"x-codex-session-id": "sid-capacity-new"},
+            affinity=proxy_service._AffinityPolicy(
+                key="sid-capacity-new",
+                kind=proxy_service.StickySessionKind.CODEX_SESSION,
+            ),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            max_sessions=1,
+        )
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.payload["error"]["code"] == "capacity_exhausted_active_sessions"
+
+
+@pytest.mark.asyncio
+async def test_create_http_bridge_session_cancellation_before_connect_handoff_releases_stream_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    account = cast(
+        Any,
+        SimpleNamespace(
+            id="acc-bridge-cancel-handoff",
+            chatgpt_account_id="acc-bridge-cancel-handoff",
+            status=AccountStatus.ACTIVE,
+            access_token_encrypted="encrypted",
+        ),
+    )
+    selected_lease = await service._load_balancer.acquire_account_lease(account.id, kind="stream")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_ensure_fresh(*_: object, **__: object) -> Any:
+        started.set()
+        await release.wait()
+        return account
+
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget",
+        AsyncMock(return_value=proxy_service.AccountSelection(account, None, lease=selected_lease)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", blocking_ensure_fresh)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        prefer_earlier_reset_accounts=False,
+                        routing_strategy="usage_weighted",
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+
+    task = asyncio.create_task(
+        service._create_http_bridge_session(
+            proxy_service._HTTPBridgeSessionKey("session_header", "sid-bridge-cancel", None),
+            headers={"x-codex-session-id": "sid-bridge-cancel"},
+            affinity=proxy_service._AffinityPolicy(
+                key="sid-bridge-cancel",
+                kind=proxy_service.StickySessionKind.CODEX_SESSION,
+            ),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+        )
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        assert await service._load_balancer.account_pressure_snapshot(account.id) == (0, 1, 0.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+
+    assert await service._load_balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
 
 
 @pytest.mark.asyncio
@@ -6191,7 +6391,7 @@ async def test_get_or_create_http_bridge_session_late_owner_after_inflight_evict
         await asyncio.wait_for(get_session(), timeout=1.0)
 
     assert waiter_exc_info.value.status_code == 429
-    assert waiter_exc_info.value.payload["error"]["code"] == "proxy_overloaded"
+    assert waiter_exc_info.value.payload["error"]["code"] == "capacity_exhausted_active_sessions"
     assert key not in service._http_bridge_inflight_sessions
 
     finish_create.set()
@@ -6199,7 +6399,7 @@ async def test_get_or_create_http_bridge_session_late_owner_after_inflight_evict
         await asyncio.wait_for(owner_task, timeout=1.0)
 
     assert owner_exc_info.value.status_code == 429
-    assert owner_exc_info.value.payload["error"]["code"] == "proxy_overloaded"
+    assert owner_exc_info.value.payload["error"]["code"] == "capacity_exhausted_active_sessions"
     assert key not in service._http_bridge_sessions
     close_http_bridge_session.assert_awaited_once_with(created)
 
@@ -7114,8 +7314,10 @@ async def test_submit_http_bridge_request_starts_api_key_reservation_heartbeat(
         *,
         response_create_gate: asyncio.Semaphore,
         compact: bool = False,
+        account_id: str | None = None,
+        surface: str = "websocket",
     ) -> None:
-        del compact
+        del compact, account_id, surface
         nonlocal admission_saw_heartbeat
         admission_saw_heartbeat = state.api_key_reservation_heartbeat_task is not None
         state.response_create_gate = response_create_gate
@@ -8055,7 +8257,7 @@ async def test_create_http_bridge_session_fails_closed_when_previous_response_ow
         )
 
     assert exc_info.value.status_code == 502
-    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
     open_upstream.assert_not_awaited()
 
 
@@ -8097,7 +8299,7 @@ async def test_stream_via_http_bridge_replays_durable_full_resend_when_owner_is_
     owner_unavailable = ProxyResponseError(
         502,
         proxy_service.openai_error(
-            "upstream_unavailable",
+            "previous_response_owner_unavailable",
             "Previous response owner account is unavailable; retry later.",
             error_type="server_error",
         ),
