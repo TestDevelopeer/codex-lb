@@ -13258,6 +13258,47 @@ async def test_stream_refresh_timeout_emits_upstream_unavailable_and_logs(monkey
 
 
 @pytest.mark.asyncio
+async def test_stream_route_fail_closed_does_not_mark_account_unhealthy(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_route_fail_closed")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    async def fake_select_account_with_budget(*args: object, **kwargs: object) -> AccountSelection:
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_ensure_fresh(account: Account, **kwargs: object) -> Account:
+        return account
+
+    async def fail_route(*args: object, **kwargs: object) -> None:
+        raise proxy_service.UpstreamProxyRouteError("pool_unavailable", account_id=account.id)
+
+    handle_stream_error = AsyncMock()
+    record_success = AsyncMock()
+    monkeypatch.setattr(service, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(service, "_resolve_upstream_route_for_account", fail_route)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["response"]["error"]["code"] == "upstream_proxy_unavailable"
+    assert request_logs.calls[-1]["account_id"] == account.id
+    assert request_logs.calls[-1]["status"] == "error"
+    assert request_logs.calls[-1]["error_code"] == "upstream_proxy_unavailable"
+    assert request_logs.calls[-1]["upstream_proxy_fail_closed_reason"] == "pool_unavailable"
+    handle_stream_error.assert_not_awaited()
+    record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stream_forced_refresh_timeout_emits_upstream_unavailable_and_logs(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

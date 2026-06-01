@@ -11471,10 +11471,14 @@ class ProxyService:
             settlement.record_success = False
             settlement.account_health_error = False
             settlement.error = {"message": error_message}
-            raise ProxyResponseError(
-                502,
-                openai_error("upstream_proxy_unavailable", error_message),
-            ) from exc
+            yield format_sse_event(
+                response_failed_event(
+                    "upstream_proxy_unavailable",
+                    error_message,
+                    response_id=request_id,
+                )
+            )
+            return
         finally:
             api_key_reservation_heartbeat_stop.set()
             if api_key_reservation_heartbeat_task is not None:
