@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import ssl
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Any, Mapping, Protocol, cast
 from urllib.parse import urlparse, urlunparse
 
+from curl_cffi.const import CurlWsFlag
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect as websocket_connect
 from websockets.datastructures import Headers
@@ -22,23 +19,20 @@ from websockets.exceptions import (
 )
 from websockets.typing import Origin
 
-from app.core.clients.account_http import (
-    _redact_proxy_uri,
-    get_account_websocket_proxy_uri,
+from app.core.clients.codex import (
+    CodexClient,
+    CodexTransportError,
+    codex_transport_error_message,
+    create_codex_session,
+    require_route_or_direct_egress_opt_in,
 )
-from app.core.clients.account_proxy_failures import record_proxy_errors_for_account
-from app.core.clients.account_tls import cached_codex_ssl_context
-from app.core.clients.proxy import (
-    FINGERPRINT_HEADER_DENY,
-    ProxyResponseError,
-    filter_inbound_headers,
-)
+from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
 from app.core.config.settings import get_settings
 from app.core.conversation_archive import archive_bytes, archive_text
 from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, openai_error
 from app.core.openai.models import OpenAIError
 from app.core.openai.parsing import parse_error_payload
-from app.core.utils.proxy_env import resolve_websocket_proxy_from_env
+from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id
 
 _WEBSOCKET_HOP_BY_HOP_HEADERS = {
@@ -118,6 +112,69 @@ class WebsocketsResponsesWebSocket:
         return str(value)
 
 
+class CodexResponsesWebSocket:
+    def __init__(
+        self,
+        websocket: Any,
+        *,
+        context: Any | None = None,
+        codex_client: CodexClient | None = None,
+        owns_codex_client: bool = False,
+        endpoint_id: str | None = None,
+        response_headers: Mapping[str, str] | None = None,
+    ) -> None:
+        self._websocket = websocket
+        self._context = context
+        self._codex_client = codex_client
+        self._owns_codex_client = owns_codex_client
+        self._endpoint_id = endpoint_id
+        self._response_headers = _normalize_response_headers(response_headers)
+
+    async def send_text(self, text: str) -> None:
+        try:
+            result = self._websocket.send_str(text)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as exc:
+            raise RuntimeError(codex_transport_error_message("websocket send", self._endpoint_id, exc)) from None
+
+    async def send_bytes(self, data: bytes) -> None:
+        try:
+            result = self._websocket.send_bytes(data)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as exc:
+            raise RuntimeError(codex_transport_error_message("websocket send", self._endpoint_id, exc)) from None
+
+    async def receive(self) -> UpstreamWebSocketMessage:
+        try:
+            data, flags = await self._websocket.recv()
+        except Exception as exc:
+            return UpstreamWebSocketMessage(
+                kind="error",
+                error=codex_transport_error_message("websocket receive", self._endpoint_id, exc),
+            )
+        if flags & int(CurlWsFlag.CLOSE):
+            return UpstreamWebSocketMessage(kind="close")
+        if flags & int(CurlWsFlag.TEXT):
+            return UpstreamWebSocketMessage(kind="text", text=data.decode("utf-8", errors="replace"))
+        return UpstreamWebSocketMessage(kind="binary", data=bytes(data))
+
+    async def close(self) -> None:
+        try:
+            result = self._websocket.close()
+            if asyncio.iscoroutine(result):
+                await result
+        finally:
+            if self._context is not None:
+                await self._context.__aexit__(None, None, None)
+            if self._owns_codex_client and self._codex_client is not None:
+                await self._codex_client.close()
+
+    def response_header(self, name: str) -> str | None:
+        return self._response_headers.get(name.lower())
+
+
 class ArchivingResponsesWebSocket:
     def __init__(
         self,
@@ -126,11 +183,18 @@ class ArchivingResponsesWebSocket:
         url: str,
         headers: dict[str, str],
         account_id: str | None,
+        route: ResolvedUpstreamRoute | None = None,
+        fallback_used: bool | None = None,
+        direct_egress: bool = False,
     ) -> None:
         self._wrapped = wrapped
         self._url = url
         self._headers = headers
         self._account_id = account_id
+        self.upstream_proxy_route_mode = route.mode if route is not None else ("direct" if direct_egress else None)
+        self.upstream_proxy_pool_id = route.pool_id if route is not None else None
+        self.upstream_proxy_endpoint_id = route.endpoint_id if route is not None else None
+        self.upstream_proxy_fallback_used = fallback_used if route is not None else None
 
     async def send_text(self, text: str) -> None:
         archive_text(
@@ -216,37 +280,16 @@ def _build_upstream_websocket_headers(
     inbound: dict[str, str],
     access_token: str,
     account_id: str | None,
-    *,
-    chatgpt_account_id: str | None = None,
 ) -> dict[str, str]:
-    # Filter both the WS hop-by-hop header (``cookie``) AND the
-    # FINGERPRINT_HEADER_DENY set in one pass. The deny set is
-    # belt-and-suspenders against the service-layer
-    # ``filter_inbound_headers`` having already removed these.
-    # Mirrors the pattern used by
-    # ``proxy._build_upstream_headers`` and the transcribe / files
-    # builders.
-    headers = {
-        key: value
-        for key, value in inbound.items()
-        if key.lower() != "cookie" and key.lower() not in FINGERPRINT_HEADER_DENY
-    }
+    headers = {key: value for key, value in inbound.items() if key.lower() != "cookie"}
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
         if request_id:
             headers["x-request-id"] = request_id
     headers["Authorization"] = f"Bearer {access_token}"
-    # The ``chatgpt-account-id`` header MUST be the upstream OpenAI
-    # account ID, NOT the codex-lb-side ``Account.id`` (which carries
-    # an ``_<email_hash>`` suffix when the account has an email).
-    # See :func:`app.core.clients.proxy._build_upstream_headers` for
-    # the full rationale. ``account_id`` continues to be the codex-lb
-    # ID used for cache / lease purposes; the new
-    # ``chatgpt_account_id`` parameter is what the header carries.
-    header_account_id = chatgpt_account_id if chatgpt_account_id is not None else account_id
-    if header_account_id:
-        headers["chatgpt-account-id"] = header_account_id
+    if account_id:
+        headers["chatgpt-account-id"] = account_id
     _ensure_responses_websocket_beta_header(headers)
     return headers
 
@@ -280,127 +323,122 @@ def _responses_websocket_url(base_url: str) -> str:
     return urlunparse(parsed._replace(scheme=scheme))
 
 
-def _sanitize_proxy_error_message(message: str, *, proxy_uri: str | None) -> str:
-    if not message or proxy_uri is None:
-        return message
-    redacted_proxy_uri = _redact_proxy_uri(proxy_uri)
-    if redacted_proxy_uri == proxy_uri:
-        return message
-    return message.replace(proxy_uri, redacted_proxy_uri)
-
-
-@asynccontextmanager
-async def _maybe_record_websocket_proxy_errors(
-    account_id: str | None,
-    *,
-    enabled: bool,
-) -> AsyncIterator[None]:
-    if enabled:
-        async with record_proxy_errors_for_account(account_id or ""):
-            yield
-        return
-    yield
-
-
 async def connect_responses_websocket(
     headers: dict[str, str],
     access_token: str,
     account_id: str | None,
     *,
     base_url: str | None = None,
-    chatgpt_account_id: str | None = None,
+    route: ResolvedUpstreamRoute | None = None,
+    codex_client: CodexClient | None = None,
+    allow_direct_egress: bool = False,
 ) -> UpstreamResponsesWebSocket:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = _responses_websocket_url(upstream_base)
-    upstream_headers = _build_upstream_websocket_headers(
-        headers,
-        access_token,
-        account_id,
-        chatgpt_account_id=chatgpt_account_id,
+    upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
+    require_route_or_direct_egress_opt_in(
+        route=route,
+        allow_direct_egress=allow_direct_egress,
+        operation="responses websocket",
     )
+    if route is not None:
+        owns_codex_client = codex_client is None
+        active_codex_client = codex_client or CodexClient(create_codex_session())
+        endpoint_id = route.endpoint_id
+        active_route = route
+        fallback_used = False
+        try:
+            opener = getattr(active_codex_client, "open_ws_with_route_metadata", None)
+            if callable(opener):
+                result = await opener(
+                    url,
+                    route=route,
+                    headers=upstream_headers,
+                    timeout=settings.upstream_connect_timeout_seconds,
+                    max_message_size=settings.max_sse_event_bytes,
+                )
+                context = result.context
+                websocket = result.websocket
+                endpoint_id = result.route.endpoint_id
+                active_route = result.route
+                fallback_used = result.fallback_used
+            else:
+                context = await active_codex_client.ws_connect(
+                    url,
+                    route=route,
+                    headers=upstream_headers,
+                    timeout=settings.upstream_connect_timeout_seconds,
+                    max_message_size=settings.max_sse_event_bytes,
+                )
+                websocket = await context.__aenter__() if hasattr(context, "__aenter__") else context
+                if not hasattr(context, "__aenter__"):
+                    context = None
+                endpoint_id = route.endpoint_id
+        except CodexTransportError as exc:
+            if owns_codex_client:
+                await active_codex_client.close()
+            raise ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", str(exc), error_type="server_error"),
+            ) from exc
+        except Exception:
+            if owns_codex_client:
+                await active_codex_client.close()
+            raise
+        return ArchivingResponsesWebSocket(
+            CodexResponsesWebSocket(
+                websocket,
+                context=context if hasattr(context, "__aenter__") else None,
+                codex_client=active_codex_client,
+                owns_codex_client=owns_codex_client,
+                endpoint_id=endpoint_id,
+                response_headers=_codex_websocket_response_headers(websocket, context),
+            ),
+            url=url,
+            headers=upstream_headers,
+            account_id=account_id,
+            route=active_route,
+            fallback_used=fallback_used,
+        )
     origin = cast(Origin | None, _pop_header_case_insensitive(upstream_headers, "origin"))
     user_agent = _pop_header_case_insensitive(upstream_headers, "user-agent")
-    # An explicit per-account SOCKS5 proxy MUST take precedence over the env-
-    # based default (``upstream_websocket_trust_env``); when no per-account
-    # proxy is configured we fall back to the existing env-based behaviour.
-    account_proxy_uri = await get_account_websocket_proxy_uri(account_id) if account_id else None
-
-    if account_proxy_uri is not None:
-        proxy_arg: str | bool | None = account_proxy_uri
-    elif settings.upstream_websocket_trust_env:
-        proxy_env = (
-            settings.upstream_websocket_proxy_env() if hasattr(settings, "upstream_websocket_proxy_env") else os.environ
-        )
-        proxy_arg = resolve_websocket_proxy_from_env(url, proxy_env)
-    else:
-        proxy_arg = None
-    # ``codex`` is the only account TLS profile. Non-account traffic keeps the
-    # default Python SSL context.
-    if account_id:
-        ssl_ctx: object | None = cached_codex_ssl_context()
-    else:
-        ssl_ctx = ssl.create_default_context()
-    connect_kwargs: dict[str, Any] = {
-        "origin": origin,
-        "additional_headers": upstream_headers or None,
-        "user_agent_header": user_agent,
-        "proxy": proxy_arg,
-        "open_timeout": settings.upstream_connect_timeout_seconds,
-        # Long Codex turns can spend minutes in upstream reasoning without
-        # sending application frames. Keep transport pings enabled so
-        # intermediaries still see liveness, but disable the library's pong
-        # watchdog so codex-lb's own request/idle budgets decide when a
-        # healthy long turn has stalled.
-        "ping_timeout": None,
-        "max_size": settings.max_sse_event_bytes,
-    }
-    if urlparse(url).scheme.lower() == "wss":
-        connect_kwargs["ssl"] = ssl_ctx
     try:
-        async with _maybe_record_websocket_proxy_errors(
-            account_id,
-            enabled=account_proxy_uri is not None,
-        ):
-            response = await websocket_connect(url, **connect_kwargs)
+        response = await websocket_connect(
+            url,
+            origin=origin,
+            additional_headers=upstream_headers or None,
+            user_agent_header=user_agent,
+            proxy=True if settings.upstream_websocket_trust_env else None,
+            open_timeout=settings.upstream_connect_timeout_seconds,
+            # Long Codex turns can spend minutes in upstream reasoning without
+            # sending application frames. Keep transport pings enabled so
+            # intermediaries still see liveness, but disable the library's pong
+            # watchdog so codex-lb's own request/idle budgets decide when a
+            # healthy long turn has stalled.
+            ping_timeout=None,
+            max_size=settings.max_sse_event_bytes,
+        )
     except asyncio.TimeoutError as exc:
         raise ProxyResponseError(
             502,
-            openai_error(
-                "upstream_unavailable",
-                _sanitize_proxy_error_message("Request to upstream timed out", proxy_uri=account_proxy_uri),
-            ),
+            openai_error("upstream_unavailable", "Request to upstream timed out"),
         ) from exc
     except InvalidStatus as exc:
         response = exc.response
-        message = _sanitize_proxy_error_message(
-            response.reason_phrase or f"Upstream websocket error: HTTP {response.status_code}",
-            proxy_uri=account_proxy_uri,
-        )
+        message = response.reason_phrase or f"Upstream websocket error: HTTP {response.status_code}"
         raise ProxyResponseError(
             response.status_code,
             _handshake_error_payload(response.status_code, message, response.headers, response.body),
         ) from exc
     except InvalidHandshake as exc:
-        message = (
-            _sanitize_proxy_error_message(
-                str(exc),
-                proxy_uri=account_proxy_uri,
-            )
-            or "Invalid upstream websocket handshake"
-        )
+        message = str(exc) or "Invalid upstream websocket handshake"
         raise ProxyResponseError(
             502,
             openai_error("upstream_unavailable", message, error_type="server_error"),
         ) from exc
     except InvalidProxy as exc:
-        message = (
-            _sanitize_proxy_error_message(
-                str(exc),
-                proxy_uri=account_proxy_uri,
-            )
-            or "Invalid upstream websocket proxy configuration"
-        )
+        message = str(exc) or "Invalid upstream websocket proxy configuration"
         raise ProxyResponseError(
             502,
             openai_error("upstream_unavailable", message, error_type="server_error"),
@@ -408,10 +446,7 @@ async def connect_responses_websocket(
     except OSError as exc:
         raise ProxyResponseError(
             502,
-            openai_error(
-                "upstream_unavailable",
-                _sanitize_proxy_error_message(str(exc), proxy_uri=account_proxy_uri),
-            ),
+            openai_error("upstream_unavailable", str(exc)),
         ) from exc
 
     return ArchivingResponsesWebSocket(
@@ -419,6 +454,7 @@ async def connect_responses_websocket(
         url=url,
         headers=upstream_headers,
         account_id=account_id,
+        direct_egress=allow_direct_egress,
     )
 
 
@@ -428,6 +464,35 @@ def _close_code_from_exception(exc: ConnectionClosedOK | ConnectionClosedError) 
     if exc.sent is not None:
         return int(exc.sent.code)
     return None
+
+
+def _codex_websocket_response_headers(websocket: object, context: object | None) -> Mapping[str, str]:
+    for source in (websocket, context):
+        headers = _response_headers_from_source(source)
+        if headers:
+            return headers
+    return {}
+
+
+def _response_headers_from_source(source: object | None) -> Mapping[str, str]:
+    if source is None:
+        return {}
+    for attr in ("response", "handshake_response"):
+        response = getattr(source, attr, None)
+        headers = getattr(response, "headers", None)
+        if headers:
+            return _normalize_response_headers(headers)
+    for attr in ("headers", "response_headers"):
+        headers = getattr(source, attr, None)
+        if headers:
+            return _normalize_response_headers(headers)
+    return {}
+
+
+def _normalize_response_headers(headers: Mapping[str, object] | None) -> dict[str, str]:
+    if headers is None:
+        return {}
+    return {str(key).lower(): str(value) for key, value in headers.items()}
 
 
 def _handshake_error_payload(

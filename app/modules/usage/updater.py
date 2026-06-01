@@ -12,17 +12,17 @@ from typing import Mapping, Protocol, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.balancer import PERMANENT_FAILURE_CODES, QUOTA_EXCEEDED_COOLDOWN_SECONDS
-from app.core.clients.account_http import invalidate_account_client
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
+from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.usage.models import AdditionalRateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
+from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
-from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 from app.modules.usage.repository import AdditionalUsageRepository
 
@@ -314,11 +314,21 @@ class UsageUpdater:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         payload: UsagePayload | None = None
         try:
+            route = await _resolve_upstream_route_for_account(account, operation="usage_refresh")
             payload = await fetch_usage(
                 access_token=access_token,
                 account_id=usage_account_id,
-                lease_account_id=account.id,
+                route=route,
+                allow_direct_egress=route is None,
             )
+        except UpstreamProxyRouteError as exc:
+            logger.warning(
+                "Usage refresh upstream proxy route unavailable account_id=%s reason=%s",
+                account.id,
+                exc.reason,
+            )
+            _mark_usage_refresh_auth_cooldown(account.id, 0)
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
         except UsageFetchError as exc:
             if _should_deactivate_for_usage_error(exc):
                 await self._deactivate_for_client_error(account, exc)
@@ -333,11 +343,21 @@ class UsageUpdater:
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             access_token = self._encryptor.decrypt(account.access_token_encrypted)
             try:
+                route = await _resolve_upstream_route_for_account(account, operation="usage_refresh")
                 payload = await fetch_usage(
                     access_token=access_token,
                     account_id=usage_account_id,
-                    lease_account_id=account.id,
+                    route=route,
+                    allow_direct_egress=route is None,
                 )
+            except UpstreamProxyRouteError as route_exc:
+                logger.warning(
+                    "Usage refresh retry upstream proxy route unavailable account_id=%s reason=%s",
+                    account.id,
+                    route_exc.reason,
+                )
+                _mark_usage_refresh_auth_cooldown(account.id, 0)
+                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             except UsageFetchError as retry_exc:
                 if _should_deactivate_for_usage_error(retry_exc):
                     await self._deactivate_for_client_error(account, retry_exc)
@@ -458,10 +478,7 @@ class UsageUpdater:
             exc.message,
             get_request_id(),
         )
-        updated = await self._auth_manager._repo.update_status(account.id, AccountStatus.DEACTIVATED, reason)
-        if updated:
-            await invalidate_account_client(account.id)
-            get_account_selection_cache().invalidate()
+        await self._auth_manager._repo.update_status(account.id, AccountStatus.DEACTIVATED, reason)
         account.status = AccountStatus.DEACTIVATED
         account.deactivation_reason = reason
 
@@ -822,6 +839,16 @@ def _should_deactivate_for_usage_error(exc: UsageFetchError) -> bool:
         return True
     lowered = exc.message.lower()
     return any(hint in lowered for hint in _DEACTIVATING_USAGE_MESSAGE_HINTS)
+
+
+async def _resolve_upstream_route_for_account(account: Account, *, operation: str) -> ResolvedUpstreamRoute | None:
+    async with get_background_session() as session:
+        return await resolve_upstream_route(
+            session,
+            account_id=account.id,
+            operation=operation,
+            scope="account",
+        )
 
 
 def _mark_usage_refresh_auth_cooldown(account_id: str, status_code: int) -> None:

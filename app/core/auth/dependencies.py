@@ -14,8 +14,10 @@ from app.core.auth.dashboard_mode import DashboardAuthMode, get_dashboard_reques
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
+from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardAuthError, ProxyAuthError, ProxyUpstreamError
 from app.core.request_locality import is_local_request
+from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.time import utcnow
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
@@ -186,16 +188,26 @@ async def validate_codex_usage_identity(request: Request) -> ApiKeyData | None:
 
     async with get_background_session() as session:
         accounts_repo = AccountsRepository(session)
-        matching_account_ids = await accounts_repo.list_active_account_ids_by_chatgpt_account_id(account_id, limit=2)
-    if not matching_account_ids:
-        raise ProxyAuthError("Unknown or inactive chatgpt-account-id")
-    lease_account_id = matching_account_ids[0] if len(matching_account_ids) == 1 else None
+        account = await accounts_repo.get_active_by_chatgpt_account_id(account_id)
+        if account is None:
+            raise ProxyAuthError("Unknown or inactive chatgpt-account-id")
+        try:
+            route = await resolve_upstream_route(
+                session,
+                account_id=account.id,
+                operation="usage_identity",
+                scope="account",
+                encryptor=TokenEncryptor(),
+            )
+        except UpstreamProxyRouteError as exc:
+            raise ProxyUpstreamError("Unable to resolve upstream proxy route for ChatGPT credentials") from exc
 
     try:
         await fetch_usage(
             access_token=token,
             account_id=account_id,
-            lease_account_id=lease_account_id,
+            route=route,
+            allow_direct_egress=route is None,
         )
     except UsageFetchError as exc:
         if exc.status_code == 429:
