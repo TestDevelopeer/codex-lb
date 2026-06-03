@@ -63,6 +63,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         self.commit_count = 0
         self.update_last_used_commit_flags: list[bool] = []
         self.touched_reservations: list[str] = []
+        self.historical_limit_usage: dict[tuple[str, str, str | None], int] = {}
 
     async def create(self, row: ApiKey, *, commit: bool = True) -> ApiKey:
         del commit
@@ -103,6 +104,18 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
 
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
         return {}
+
+    async def get_historical_limit_usage(
+        self,
+        key_id: str,
+        *,
+        limit_type: LimitType,
+        since: datetime,
+        until: datetime,
+        model_filter: str | None = None,
+    ) -> int:
+        del since, until
+        return self.historical_limit_usage.get((key_id, limit_type.value, model_filter), 0)
 
     async def update(
         self,
@@ -965,6 +978,39 @@ async def test_update_key_ignores_null_apply_to_codex_model_patch_value() -> Non
     stored = await repo.get_by_id(created.id)
     assert stored is not None
     assert stored.apply_to_codex_model is True
+
+
+@pytest.mark.asyncio
+async def test_update_key_seeds_new_limit_from_existing_usage() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="seed-existing-usage",
+            allowed_models=None,
+            expires_at=None,
+        )
+    )
+    repo.historical_limit_usage[(created.id, "total_tokens", None)] = 321
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            limits=[
+                LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=500),
+            ],
+            limits_set=True,
+        ),
+    )
+
+    assert len(updated.limits) == 1
+    assert updated.limits[0].current_value == 321
+
+    stored = await repo.get_by_id(created.id)
+    assert stored is not None
+    assert len(stored.limits) == 1
+    assert stored.limits[0].current_value == 321
 
 
 @pytest.mark.asyncio

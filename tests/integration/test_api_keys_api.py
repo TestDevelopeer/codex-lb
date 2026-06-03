@@ -2119,6 +2119,96 @@ async def test_update_key_same_policy_and_max_change_preserve_usage_state(async_
 
 
 @pytest.mark.asyncio
+async def test_update_key_new_limit_seeds_existing_usage_and_blocks_next_request(async_client, monkeypatch):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "seed-existing-usage-limit",
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    key = payload["key"]
+    key_id = payload["id"]
+
+    await _import_account(async_client, "acc_seeded_limit", "seeded-limit@example.com")
+
+    seen = {"calls": 0}
+
+    async def fake_compact(_payload, _headers, _access_token, _account_id):
+        seen["calls"] += 1
+        return OpenAIResponsePayload.model_validate(
+            {
+                "id": "resp_seed_existing_usage",
+                "model": _TEST_MODELS[0],
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 5,
+                    "total_tokens": 12,
+                },
+                "output": [],
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    first = await async_client.post(
+        "/v1/responses/compact",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": _TEST_MODELS[0], "instructions": "hi", "input": []},
+    )
+    assert first.status_code == 200
+    assert seen["calls"] == 1
+
+    historical_usage = 0
+    for _ in range(10):
+        async with SessionLocal() as session:
+            repo = ApiKeysRepository(session)
+            limits_now = await repo.get_historical_limit_usage(
+                key_id,
+                limit_type=api_keys_repository_module.LimitType.TOTAL_TOKENS,
+                since=utcnow() - timedelta(days=7),
+                until=utcnow(),
+            )
+        historical_usage = limits_now
+        if historical_usage == 12:
+            break
+        await asyncio.sleep(0.05)
+    assert historical_usage == 12
+
+    patched = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 10},
+            ],
+        },
+    )
+    assert patched.status_code == 200
+    assert patched.json()["limits"][0]["currentValue"] == 12
+
+    blocked = await async_client.post(
+        "/v1/responses/compact",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": _TEST_MODELS[0], "instructions": "hi", "input": []},
+    )
+    assert blocked.status_code == 429
+    assert seen["calls"] == 1
+
+
+@pytest.mark.asyncio
 async def test_update_key_reset_usage_requires_explicit_action(async_client):
     created = await async_client.post(
         "/api/api-keys/",

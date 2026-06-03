@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from app.db.models import LimitType, LimitWindow
 from app.modules.api_keys.service import (
+    ApiKeysRepositoryProtocol,
     ApiKeyValidationError,
     LimitRuleInput,
     _build_limit_rows_for_update,
@@ -60,7 +63,13 @@ def test_limit_input_to_row_raises_typed_validation_error_for_credits_with_model
     assert "credits" in str(info.value).lower()
 
 
-def test_build_limit_rows_for_update_raises_typed_validation_error_on_duplicate_rules() -> None:
+class _NoHistoricalUsageRepository:
+    async def get_historical_limit_usage(self, *args, **kwargs) -> int:
+        return 0
+
+
+@pytest.mark.asyncio
+async def test_build_limit_rows_for_update_raises_typed_validation_error_on_duplicate_rules() -> None:
     rule = LimitRuleInput(
         limit_type=LimitType.TOTAL_TOKENS.value,
         limit_window=LimitWindow.DAILY.value,
@@ -68,7 +77,8 @@ def test_build_limit_rows_for_update_raises_typed_validation_error_on_duplicate_
         model_filter=None,
     )
     with pytest.raises(ApiKeyValidationError) as info:
-        _build_limit_rows_for_update(
+        await _build_limit_rows_for_update(
+            repository=cast(ApiKeysRepositoryProtocol, _NoHistoricalUsageRepository()),
             key_id="key-1",
             now=__import__("datetime").datetime(2026, 5, 15),
             submitted_limits=[rule, rule],

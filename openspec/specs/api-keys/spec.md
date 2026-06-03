@@ -377,7 +377,8 @@ The service contract SHALL be typed explicitly: `enforce_limits_for_request(key_
 When updating API key limits, the system SHALL preserve existing usage state (`current_value`, `reset_at`) for unchanged limit rules. Limit comparison key is `(limit_type, limit_window, model_filter)`.
 
 - Matching existing rule: `current_value` and `reset_at` SHALL be preserved; only `max_value` is updated
-- New rule (no match): `current_value=0` and fresh `reset_at`
+- New rule on an existing API key: fresh `reset_at` SHALL be created and `current_value` SHALL be seeded from the API key's existing request-log usage inside the trailing current window ending at update time, using the new rule's type and optional `model_filter`
+- New rule on a brand-new API key with no matching request logs: `current_value=0`
 - Removed rule (in existing but not in update): row is deleted
 
 Usage reset SHALL only occur via an explicit action (`reset_usage` field or dedicated endpoint), never as a side-effect of metadata or policy edits.
@@ -397,6 +398,12 @@ Usage reset SHALL only occur via an explicit action (`reset_usage` field or dedi
 
 - **WHEN** an API key PATCH includes `limits` with a changed `max_value` for an existing rule
 - **THEN** `current_value` and `reset_at` are preserved; only the threshold changes
+
+#### Scenario: New rule seeds current window usage for an already-used key
+
+- **WHEN** an API key PATCH adds a new limit rule to a key that already has request logs in the current limit window
+- **THEN** the new rule gets a fresh `reset_at`
+- **AND** its `current_value` equals the matching current-window request-log usage for that key and rule
 
 #### Scenario: Explicit reset action resets usage
 

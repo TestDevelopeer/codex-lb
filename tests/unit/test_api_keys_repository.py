@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.db.models import LimitWindow
+from app.db.models import LimitType, LimitWindow
 from app.modules.api_keys.repository import ApiKeyAccountCost, ApiKeysRepository
 
 pytestmark = pytest.mark.unit
@@ -246,3 +246,58 @@ class TestUsage7d:
             ),
         ]
         session.execute.assert_awaited_once()
+
+
+class TestHistoricalLimitUsage:
+    @pytest.mark.asyncio
+    async def test_uses_model_filter_for_total_tokens(self) -> None:
+        session = AsyncMock()
+        repo = ApiKeysRepository(session)
+        since = datetime(2026, 5, 1, 0, 0, 0)
+        until = datetime(2026, 5, 8, 0, 0, 0)
+        statements: list[str] = []
+
+        async def _execute(statement):
+            statements.append(str(statement))
+            return SimpleNamespace(scalar_one=lambda: 42)
+
+        session.execute.side_effect = _execute
+
+        result = await repo.get_historical_limit_usage(
+            "key_1",
+            limit_type=LimitType.TOTAL_TOKENS,
+            since=since,
+            until=until,
+            model_filter="gpt-5.1",
+        )
+
+        assert result == 42
+        assert len(statements) == 1
+        assert "request_logs.model =" in statements[0]
+        assert "request_logs.input_tokens" in statements[0]
+
+    @pytest.mark.asyncio
+    async def test_cost_limits_sum_microdollars(self) -> None:
+        session = AsyncMock()
+        repo = ApiKeysRepository(session)
+        since = datetime(2026, 5, 1, 0, 0, 0)
+        until = datetime(2026, 5, 8, 0, 0, 0)
+        statements: list[str] = []
+
+        async def _execute(statement):
+            statements.append(str(statement))
+            return SimpleNamespace(scalar_one=lambda: 1_250_000)
+
+        session.execute.side_effect = _execute
+
+        result = await repo.get_historical_limit_usage(
+            "key_1",
+            limit_type=LimitType.COST_USD,
+            since=since,
+            until=until,
+        )
+
+        assert result == 1_250_000
+        assert len(statements) == 1
+        assert "cost_usd" in statements[0]
+        assert "round(coalesce(request_logs.cost_usd" in statements[0]

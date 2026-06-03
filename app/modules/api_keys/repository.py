@@ -254,6 +254,43 @@ class ApiKeysRepository:
             total_cost_usd=round(float(row.total_cost_usd or 0.0), 6),
         )
 
+    async def get_historical_limit_usage(
+        self,
+        key_id: str,
+        *,
+        limit_type: LimitType,
+        since: datetime,
+        until: datetime,
+        model_filter: str | None = None,
+    ) -> int:
+        if limit_type == LimitType.CREDITS:
+            return 0
+
+        output_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+        if limit_type == LimitType.TOTAL_TOKENS:
+            value_expr = func.coalesce(RequestLog.input_tokens, 0) + output_expr
+        elif limit_type == LimitType.INPUT_TOKENS:
+            value_expr = func.coalesce(RequestLog.input_tokens, 0)
+        elif limit_type == LimitType.OUTPUT_TOKENS:
+            value_expr = output_expr
+        elif limit_type == LimitType.COST_USD:
+            value_expr = func.round(func.coalesce(RequestLog.cost_usd, 0.0) * 1_000_000)
+        else:
+            return 0
+
+        conditions = [
+            RequestLog.api_key_id == key_id,
+            RequestLog.requested_at >= since,
+            RequestLog.requested_at < until,
+            self._exclude_warmup_clause(),
+        ]
+        if model_filter is not None:
+            conditions.append(RequestLog.model == model_filter)
+
+        stmt = select(func.coalesce(func.sum(value_expr), 0)).where(*conditions)
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one() or 0)
+
     async def update(
         self,
         key_id: str,

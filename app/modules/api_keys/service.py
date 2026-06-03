@@ -23,7 +23,7 @@ from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, ApiKey, ApiKeyLimit, LimitType, LimitWindow, UsageHistory
 from app.db.session import sqlite_writer_section
-from app.modules.api_keys.limit_windows import advance_limit_reset, next_limit_reset
+from app.modules.api_keys.limit_windows import advance_limit_reset, limit_window_delta, next_limit_reset
 from app.modules.api_keys.repository import (
     _UNSET,
     ApiKeyTrendBucket,
@@ -57,6 +57,15 @@ class ApiKeysRepositoryProtocol(Protocol):
     async def list_all(self) -> list[ApiKey]: ...
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]: ...
     async def get_usage_summary_by_key_id(self, key_id: str) -> ApiKeyUsageSummary: ...
+    async def get_historical_limit_usage(
+        self,
+        key_id: str,
+        *,
+        limit_type: LimitType,
+        since: datetime,
+        until: datetime,
+        model_filter: str | None = None,
+    ) -> int: ...
     async def list_accounts_by_ids(self, account_ids: list[str]) -> list[Account]: ...
     async def list_all_accounts(self) -> list[Account]: ...
 
@@ -544,7 +553,8 @@ class ApiKeysService:
             now = utcnow()
             existing_limits = await self._repository.get_limits_by_key(key_id)
             submitted_limits = payload.limits or []
-            limit_rows = _build_limit_rows_for_update(
+            limit_rows = await _build_limit_rows_for_update(
+                repository=self._repository,
                 key_id=key_id,
                 now=now,
                 submitted_limits=submitted_limits,
@@ -1510,8 +1520,9 @@ def _limit_input_to_row(
     )
 
 
-def _build_limit_rows_for_update(
+async def _build_limit_rows_for_update(
     *,
+    repository: ApiKeysRepositoryProtocol,
     key_id: str,
     now: datetime,
     submitted_limits: list[LimitRuleInput],
@@ -1528,7 +1539,17 @@ def _build_limit_rows_for_update(
         identity = _limit_identity_from_input(submitted)
         matched = existing_by_key.get(identity)
         if matched is None or reset_usage:
-            rows.append(_limit_input_to_row(submitted, key_id, now))
+            seeded = _limit_input_to_row(submitted, key_id, now)
+            if matched is None and not reset_usage:
+                window_start = now - limit_window_delta(seeded.limit_window)
+                seeded.current_value = await repository.get_historical_limit_usage(
+                    key_id,
+                    limit_type=seeded.limit_type,
+                    since=window_start,
+                    until=now,
+                    model_filter=seeded.model_filter,
+                )
+            rows.append(seeded)
             continue
         rows.append(
             _limit_input_to_row(
