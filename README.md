@@ -574,6 +574,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/mastertyko"><img src="https://avatars.githubusercontent.com/u/11311479?v=4?s=100" width="100px;" alt="mastertyko"/><br /><sub><b>mastertyko</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=mastertyko" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mastertyko" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/geoHeil"><img src="https://avatars.githubusercontent.com/u/1694964?v=4?s=100" width="100px;" alt="geoHeil"/><br /><sub><b>geoHeil</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=geoHeil" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=geoHeil" title="Tests">⚠️</a></td>
     </tr>
   </tbody>
 </table>
