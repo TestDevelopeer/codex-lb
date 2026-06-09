@@ -8,11 +8,18 @@ from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 
 
-def _account(account_id: str = "acc_refresh") -> Account:
+def _account(
+    account_id: str = "acc_refresh",
+    *,
+    chatgpt_account_id: str = "chatgpt_refresh",
+    email: str | None = None,
+    workspace_id: str | None = None,
+) -> Account:
     return Account(
         id=account_id,
-        chatgpt_account_id="chatgpt_refresh",
-        email=f"{account_id}@example.com",
+        chatgpt_account_id=chatgpt_account_id,
+        email=email or f"{account_id}@example.com",
+        workspace_id=workspace_id,
         plan_type="plus",
         access_token_encrypted=b"access",
         refresh_token_encrypted=b"refresh",
@@ -48,3 +55,66 @@ async def test_list_accounts_refresh_existing_reloads_identity_map(db_setup):
         refreshed = (await reader_repo.list_accounts(refresh_existing=True))[0]
         assert refreshed is loaded
         assert refreshed.limit_warmup_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_upsert_account_slot_preserves_emails_sharing_workspace_identity(db_setup):
+    del db_setup
+    shared_chatgpt_id = "chatgpt_workspace_shared"
+    shared_workspace_id = "workspace_shared"
+    first = _account(
+        "first_slot",
+        chatgpt_account_id=shared_chatgpt_id,
+        email="first@example.com",
+        workspace_id=shared_workspace_id,
+    )
+    second = _account(
+        "second_slot",
+        chatgpt_account_id=shared_chatgpt_id,
+        email="second@example.com",
+        workspace_id=shared_workspace_id,
+    )
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        saved_first = await repo.upsert_account_slot(first, preserve_unknown_workspace_duplicates=False)
+        saved_second = await repo.upsert_account_slot(second, preserve_unknown_workspace_duplicates=False)
+
+        assert saved_first.id == "first_slot"
+        assert saved_second.id == "second_slot"
+        accounts = await repo.list_accounts()
+
+    assert [(account.id, account.email) for account in accounts] == [
+        ("first_slot", "first@example.com"),
+        ("second_slot", "second@example.com"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_upsert_account_slot_preserves_emails_sharing_workspace_less_identity(db_setup):
+    del db_setup
+    shared_chatgpt_id = "chatgpt_workspace_less_shared"
+    first = _account(
+        "workspace_less_first",
+        chatgpt_account_id=shared_chatgpt_id,
+        email="first@example.com",
+    )
+    second = _account(
+        "workspace_less_second",
+        chatgpt_account_id=shared_chatgpt_id,
+        email="second@example.com",
+    )
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        saved_first = await repo.upsert_account_slot(first, preserve_unknown_workspace_duplicates=False)
+        saved_second = await repo.upsert_account_slot(second, preserve_unknown_workspace_duplicates=False)
+
+        assert saved_first.id == "workspace_less_first"
+        assert saved_second.id == "workspace_less_second"
+        accounts = await repo.list_accounts()
+
+    assert [(account.id, account.email) for account in accounts] == [
+        ("workspace_less_first", "first@example.com"),
+        ("workspace_less_second", "second@example.com"),
+    ]

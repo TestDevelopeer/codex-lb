@@ -202,6 +202,7 @@ class AccountsRepository:
             canonical = await self._account_by_chatgpt_identity(
                 account.chatgpt_account_id,
                 workspace_id=account.workspace_id,
+                email=account.email,
             )
             if canonical is not None:
                 _apply_account_updates(canonical, account)
@@ -209,6 +210,7 @@ class AccountsRepository:
                     canonical=canonical,
                     chatgpt_account_id=account.chatgpt_account_id,
                     workspace_id=account.workspace_id,
+                    email=account.email,
                 )
                 await self._session.commit()
                 await self._session.refresh(canonical)
@@ -241,8 +243,6 @@ class AccountsRepository:
         return account
 
     async def upsert_reauthorized(self, account: Account) -> Account:
-        if account.chatgpt_account_id:
-            return await self.upsert(account, merge_by_email=False, merge_by_chatgpt_identity=True)
         return await self.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
 
     async def upsert_account_slot(
@@ -306,6 +306,7 @@ class AccountsRepository:
         chatgpt_account_id: str,
         *,
         workspace_id: str | None,
+        email: str | None,
     ) -> Account | None:
         """Return the canonical local account row for a ChatGPT identity.
 
@@ -318,6 +319,8 @@ class AccountsRepository:
         """
 
         stmt = select(Account).where(Account.chatgpt_account_id == chatgpt_account_id)
+        if email:
+            stmt = stmt.where(Account.email == email)
         order_by: list[Any] = [Account.created_at.asc(), Account.id.asc()]
         if workspace_id:
             stmt = stmt.where(or_(Account.workspace_id == workspace_id, Account.workspace_id.is_(None)))
@@ -333,11 +336,14 @@ class AccountsRepository:
         canonical: Account,
         chatgpt_account_id: str,
         workspace_id: str | None,
+        email: str | None,
     ) -> None:
         duplicate_stmt = select(Account.id).where(
             Account.chatgpt_account_id == chatgpt_account_id,
             Account.id != canonical.id,
         )
+        if email:
+            duplicate_stmt = duplicate_stmt.where(Account.email == email)
         if workspace_id is None:
             duplicate_stmt = duplicate_stmt.where(Account.workspace_id.is_(None))
         else:
@@ -653,11 +659,11 @@ class AccountsRepository:
         return matches[0]
 
     async def _account_by_slot_identity(self, account: Account) -> Account | None:
-        if account.chatgpt_account_id and account.workspace_id:
+        if account.chatgpt_account_id and account.email:
             result = await self._session.execute(
                 select(Account)
                 .where(Account.chatgpt_account_id == account.chatgpt_account_id)
-                .where(Account.workspace_id == account.workspace_id)
+                .where(Account.email == account.email)
                 .order_by(Account.created_at.asc(), Account.id.asc())
                 .limit(1)
             )
@@ -733,8 +739,8 @@ def _slot_lock_key(account: Account, *, preserve_unknown_workspace_duplicates: b
 
 def _slot_lock_keys(account: Account, *, preserve_unknown_workspace_duplicates: bool = True) -> tuple[str, ...]:
     keys: list[str] = []
-    if account.chatgpt_account_id and account.workspace_id:
-        keys.append(f"slot:{account.chatgpt_account_id}:{account.workspace_id}")
+    if account.chatgpt_account_id and account.email:
+        keys.append(f"slot:{account.chatgpt_account_id}:{account.email}")
     if account.email and account.workspace_id:
         keys.append(f"slot-email:{account.email}:{account.workspace_id}")
         if not preserve_unknown_workspace_duplicates:

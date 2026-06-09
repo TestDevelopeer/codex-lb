@@ -222,6 +222,7 @@ def _account_to_summary(
     )
     return AccountSummary(
         account_id=account.id,
+        chatgpt_account_id=account.chatgpt_account_id,
         email=account.email,
         alias=account.alias,
         display_name=account.alias or account.email,
