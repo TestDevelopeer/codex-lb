@@ -251,7 +251,7 @@ def guard_pull_request(root: Path, event: dict[str, Any], base_ref: str, head_re
     current_versions = read_project_versions(root)
     base_versions = _read_project_versions_at_ref(root, base_ref)
     if current_versions == base_versions:
-        print("No release-managed version metadata changed; beta release PR guard passed.")
+        print("No release-managed version files changed; release metadata is unchanged; beta release PR guard passed.")
         return
 
     release = read_consistent_release_version(root)
