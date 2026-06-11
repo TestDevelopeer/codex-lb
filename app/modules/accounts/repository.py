@@ -796,6 +796,10 @@ def _is_workspace_less_reauth_for_known_slot(
 
 
 def _can_reuse_email_fallback(existing: Account, incoming: Account) -> bool:
+    existing_workspace_key = _workspace_slot_key(existing)
+    incoming_workspace_key = _workspace_slot_key(incoming)
+    if existing_workspace_key and incoming_workspace_key and existing_workspace_key != incoming_workspace_key:
+        return False
     return (
         not incoming.chatgpt_account_id
         or not existing.chatgpt_account_id
