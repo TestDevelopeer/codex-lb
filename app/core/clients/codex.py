@@ -117,6 +117,28 @@ class _SessionOwnedResponse:
         return json.loads(await self.read())
 
 
+class _SessionOwnedWebSocketContext:
+    def __init__(self, context: Any, session: aiohttp.ClientSession) -> None:
+        self._context = context
+        self._session = session
+
+    async def __aenter__(self) -> Any:
+        return self._context
+
+    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        try:
+            if hasattr(self._context, "__aexit__"):
+                await self._context.__aexit__(exc_type, exc, traceback)
+            else:
+                close = getattr(self._context, "close", None)
+                if callable(close):
+                    result = close()
+                    if asyncio.iscoroutine(result):
+                        await result
+        finally:
+            await self._session.close()
+
+
 class CodexClient:
     def __init__(self, session: Any) -> None:
         self._session = session
@@ -174,14 +196,17 @@ class CodexClient:
             candidate = route.with_endpoint(endpoint, tuple(endpoints[index + 1 :]))
             context: Any | None = None
             try:
-                context = self._session.ws_connect(
-                    url,
-                    proxy=endpoint.proxy_url,
-                    **kwargs,
-                )
-                if asyncio.iscoroutine(context):
-                    context = await context
-                websocket = await context.__aenter__() if hasattr(context, "__aenter__") else context
+                if endpoint.scheme.startswith("socks"):
+                    websocket, context = await _open_ws_via_socks_proxy(url, endpoint.proxy_url, **kwargs)
+                else:
+                    context = self._session.ws_connect(
+                        url,
+                        proxy=endpoint.proxy_url,
+                        **kwargs,
+                    )
+                    if asyncio.iscoroutine(context):
+                        context = await context
+                    websocket = await context.__aenter__() if hasattr(context, "__aenter__") else context
                 return CodexWebSocketResult(
                     websocket,
                     context if hasattr(context, "__aenter__") else None,
@@ -240,6 +265,26 @@ async def _request_via_socks_proxy(
     finally:
         if buffer_response:
             await session.close()
+
+
+async def _open_ws_via_socks_proxy(url: str, proxy_url: str, **kwargs: Any) -> tuple[Any, Any]:
+    from app.core.clients.http import _build_ssl_context
+
+    connector = ProxyConnector.from_url(proxy_url, ssl=_build_ssl_context())
+    session = aiohttp.ClientSession(
+        connector=connector,
+        timeout=aiohttp.ClientTimeout(total=None),
+        trust_env=False,
+    )
+    try:
+        context = session.ws_connect(url, **kwargs)
+        if asyncio.iscoroutine(context):
+            context = await context
+        websocket = await context.__aenter__() if hasattr(context, "__aenter__") else context
+        return websocket, _SessionOwnedWebSocketContext(context, session)
+    except Exception:
+        await session.close()
+        raise
 
 
 async def _buffer_response(response: Any) -> Any:

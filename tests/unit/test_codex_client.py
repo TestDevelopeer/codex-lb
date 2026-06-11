@@ -53,6 +53,45 @@ class _WsFailSession:
         raise _HandshakeFailure("Upgrade Required")
 
 
+class _WsContext:
+    def __init__(self) -> None:
+        self.websocket = object()
+        self.exited = False
+
+    async def __aenter__(self) -> object:
+        return self.websocket
+
+    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.exited = True
+
+
+class _SocksWsSession:
+    latest: "_SocksWsSession | None" = None
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.calls: list[dict[str, Any]] = []
+        self.context = _WsContext()
+        self.closed = False
+        _SocksWsSession.latest = self
+
+    def ws_connect(self, url: str, **kwargs: Any) -> _WsContext:
+        self.calls.append({"url": url, **kwargs})
+        return self.context
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _SocksConnector:
+    calls: list[dict[str, Any]] = []
+
+    @classmethod
+    def from_url(cls, proxy_url: str, **kwargs: Any) -> object:
+        cls.calls.append({"proxy_url": proxy_url, **kwargs})
+        return object()
+
+
 @pytest.fixture
 def route() -> ResolvedUpstreamRoute:
     return ResolvedUpstreamRoute(
@@ -176,3 +215,31 @@ async def test_websocket_transport_error_preserves_handshake_status(route: Resol
         await client.open_ws_with_route_metadata("wss://upstream.test", route=route)
 
     assert getattr(exc_info.value, "status_code") == 426
+
+
+@pytest.mark.asyncio
+async def test_socks_websocket_uses_proxy_connector_and_closes_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "socks5h", "proxy.test", 1080, "u", "p"),
+    )
+    _SocksConnector.calls = []
+    _SocksWsSession.latest = None
+    monkeypatch.setattr("app.core.clients.codex.ProxyConnector", _SocksConnector)
+    monkeypatch.setattr("app.core.clients.codex.aiohttp.ClientSession", _SocksWsSession)
+    client = CodexClient(_Session())
+
+    result = await client.open_ws_with_route_metadata("wss://upstream.test", route=route, heartbeat=30)
+
+    session = _SocksWsSession.latest
+    assert session is not None
+    assert _SocksConnector.calls[0]["proxy_url"] == "socks5h://u:p@proxy.test:1080"
+    assert session.calls == [{"url": "wss://upstream.test", "heartbeat": 30}]
+    assert "proxy" not in session.calls[0]
+    assert result.websocket is session.context.websocket
+
+    await result.context.__aexit__(None, None, None)
+
+    assert session.context.exited is True
+    assert session.closed is True
