@@ -683,6 +683,18 @@ class AccountsRepository:
             )
             if matched := result.scalar_one_or_none():
                 return matched
+        if account.chatgpt_account_id and account.email and account.workspace_id and account.workspace_label:
+            result = await self._session.execute(
+                select(Account)
+                .where(Account.chatgpt_account_id == account.chatgpt_account_id)
+                .where(Account.email == account.email)
+                .where(Account.workspace_id.is_(None))
+                .where(Account.workspace_label == account.workspace_label)
+                .order_by(Account.created_at.asc(), Account.id.asc())
+                .limit(1)
+            )
+            if matched := result.scalar_one_or_none():
+                return matched
         if workspace_slot and account.email:
             column, value = workspace_slot
             result = await self._session.execute(
