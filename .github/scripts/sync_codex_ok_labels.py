@@ -639,8 +639,19 @@ def classify_check_state(
 ) -> str:
     states: list[str] = []
     seen_check_names: set[str] = set()
+    named_check_runs: dict[str, dict[str, Any]] = {}
+    unnamed_check_runs: list[dict[str, Any]] = []
 
     for item in check_runs:
+        name = item.get("name")
+        if isinstance(name, str):
+            previous = named_check_runs.get(name)
+            if previous is None or check_run_recency_key(item) >= check_run_recency_key(previous):
+                named_check_runs[name] = item
+        else:
+            unnamed_check_runs.append(item)
+
+    for item in [*named_check_runs.values(), *unnamed_check_runs]:
         name = item.get("name")
         if isinstance(name, str):
             seen_check_names.add(name)
@@ -663,6 +674,21 @@ def classify_check_state(
     if all(state in SUCCESS_CHECK_STATES for state in states):
         return "success"
     return "unknown"
+
+
+def check_run_recency_key(item: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(
+            item.get("started_at")
+            or item.get("startedAt")
+            or item.get("created_at")
+            or item.get("createdAt")
+            or item.get("completed_at")
+            or item.get("completedAt")
+            or ""
+        ),
+        str(item.get("completed_at") or item.get("completedAt") or ""),
+    )
 
 
 def commit_checks_state(repo: str, head_sha: str) -> str:
@@ -753,18 +779,16 @@ def unresolved_codex_finding_thread_urls(
                 original_oid = original_commit.get("oid") if isinstance(original_commit, dict) else None
                 commit = comment.get("commit")
                 commit_oid = commit.get("oid") if isinstance(commit, dict) else None
-                if (
-                    isinstance(original_oid, str)
-                    and original_oid != head_sha
-                    and not body_mentions_head(body, head_sha)
-                ):
-                    continue
-                if (
-                    original_oid is None
-                    and isinstance(commit_oid, str)
-                    and commit_oid != head_sha
-                    and not body_mentions_head(body, head_sha)
-                ):
+                body_mentions_current_head = body_mentions_head(body, head_sha)
+                if body_mentions_current_head:
+                    pass
+                elif isinstance(original_oid, str):
+                    if original_oid != head_sha:
+                        continue
+                elif isinstance(commit_oid, str):
+                    if commit_oid != head_sha:
+                        continue
+                else:
                     continue
                 url = comment.get("url")
                 urls.append(str(url) if isinstance(url, str) else "unresolved Codex review thread")

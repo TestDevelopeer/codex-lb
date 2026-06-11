@@ -44,6 +44,97 @@ def decision(module: ModuleType, **overrides: Any) -> Any:
     return module.SyncDecision(**values)
 
 
+def test_classify_check_state_uses_latest_run_for_duplicate_check_names() -> None:
+    module = load_sync_module()
+
+    check_runs = [
+        {
+            "name": "CI Required",
+            "status": "completed",
+            "conclusion": "failure",
+            "completed_at": "2026-06-11T07:40:59Z",
+        },
+        {
+            "name": "CI Required",
+            "status": "completed",
+            "conclusion": "success",
+            "completed_at": "2026-06-11T07:45:35Z",
+        },
+        {
+            "name": "Type check (ty)",
+            "status": "completed",
+            "conclusion": "success",
+            "completed_at": "2026-06-11T07:41:20Z",
+        },
+    ]
+
+    assert (
+        module.classify_check_state(
+            check_runs,
+            {"statuses": []},
+            required_check_names=frozenset({"CI Required", "Type check (ty)"}),
+        )
+        == "success"
+    )
+
+
+def test_classify_check_state_keeps_latest_pending_duplicate_pending() -> None:
+    module = load_sync_module()
+
+    check_runs = [
+        {
+            "name": "CI Required",
+            "status": "completed",
+            "conclusion": "success",
+            "completed_at": "2026-06-11T07:40:59Z",
+        },
+        {
+            "name": "CI Required",
+            "status": "in_progress",
+            "conclusion": None,
+            "started_at": "2026-06-11T07:45:35Z",
+        },
+    ]
+
+    assert (
+        module.classify_check_state(
+            check_runs,
+            {"statuses": []},
+            required_check_names=frozenset({"CI Required"}),
+        )
+        == "pending"
+    )
+
+
+def test_classify_check_state_ignores_stale_duplicate_that_finishes_late() -> None:
+    module = load_sync_module()
+
+    check_runs = [
+        {
+            "name": "CI Required",
+            "status": "completed",
+            "conclusion": "failure",
+            "started_at": "2026-06-11T07:40:59Z",
+            "completed_at": "2026-06-11T07:50:00Z",
+        },
+        {
+            "name": "CI Required",
+            "status": "in_progress",
+            "conclusion": None,
+            "started_at": "2026-06-11T07:45:35Z",
+        },
+    ]
+
+    assert (
+        module.classify_check_state(
+            check_runs,
+            {"statuses": []},
+            required_check_names=frozenset({"CI Required"}),
+        )
+        == "pending"
+    )
+
+
 def test_apply_decision_tolerates_github_app_write_denial(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_sync_module()
 
@@ -372,6 +463,21 @@ def test_unresolved_codex_threads_filter_to_current_head(monkeypatch: pytest.Mon
                                                 "url": "https://example.invalid/fallback",
                                                 "commit": {"oid": head_sha},
                                                 "originalCommit": {"oid": old_sha},
+                                            }
+                                        ]
+                                    },
+                                },
+                                {
+                                    "isResolved": False,
+                                    "isOutdated": False,
+                                    "comments": {
+                                        "nodes": [
+                                            {
+                                                "author": {"login": "openai-codex"},
+                                                "body": "**[P1]** unresolved stale thread without commit metadata",
+                                                "url": "https://example.invalid/no-commit-metadata",
+                                                "commit": None,
+                                                "originalCommit": None,
                                             }
                                         ]
                                     },
