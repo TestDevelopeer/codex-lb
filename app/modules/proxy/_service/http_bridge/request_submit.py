@@ -189,6 +189,7 @@ class _HTTPBridgeRequestSubmitMixin:
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         request_id: str | None = None,
+        client_ip: str | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
         request_state, text_data = self._prepare_response_bridge_request_state(
             payload,
@@ -202,6 +203,7 @@ class _HTTPBridgeRequestSubmitMixin:
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
         )
         request_state.useragent, request_state.useragent_group = _request_log_useragent_fields(headers)
+        request_state.client_ip = client_ip
         return request_state, text_data
 
     def _prepare_response_bridge_request_state(

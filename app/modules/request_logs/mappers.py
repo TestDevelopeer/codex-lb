@@ -45,6 +45,7 @@ def to_request_log_entry(log: RequestLog, *, api_key_name: str | None = None) ->
         source=log.source,
         useragent=log.useragent,
         useragent_group=log.useragent_group,
+        client_ip=log.client_ip,
         transport=log.transport,
         service_tier=log.service_tier,
         requested_service_tier=log.requested_service_tier,

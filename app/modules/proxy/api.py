@@ -75,6 +75,7 @@ from app.core.openai.models import (
 from app.core.openai.parsing import parse_response_payload
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
+from app.core.request_locality import resolve_request_client_host
 from app.core.resilience.overload import is_local_overload_error_code, merge_retry_after_headers
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
@@ -539,6 +540,7 @@ async def responses_websocket(
         codex_session_affinity=True,
         openai_cache_affinity=True,
         api_key=api_key,
+        client_ip=resolve_request_client_host(websocket),
     )
 
 
@@ -639,6 +641,7 @@ async def internal_bridge_responses(
         forwarded_downstream_turn_state=forwarded_request_context.context.downstream_turn_state,
         forwarded_affinity_kind=forwarded_request_context.context.original_affinity_kind,
         forwarded_affinity_key=forwarded_request_context.context.original_affinity_key,
+        forwarded_client_ip=forwarded_request_context.context.client_ip,
         # The OpenAI-SDK contract rewrites (drop ``codex.*``, backfill terminal
         # output, synthesize ``response.created``) MUST be applied by the
         # origin instance — the one that actually responds to the client — so
@@ -672,6 +675,7 @@ async def v1_responses_websocket(
         codex_session_affinity=False,
         openai_cache_affinity=True,
         api_key=api_key,
+        client_ip=resolve_request_client_host(websocket),
     )
 
 
@@ -1394,6 +1398,7 @@ async def _proxy_images_generation_request(
         openai_cache_affinity=True,
         api_key=api_key,
         api_key_reservation=None,
+        client_ip=resolve_request_client_host(request),
     )
 
     # ``images_service`` populates ``response_id`` once the upstream stream
@@ -1593,6 +1598,7 @@ async def _proxy_images_edit_request(
         openai_cache_affinity=True,
         api_key=api_key,
         api_key_reservation=None,
+        client_ip=resolve_request_client_host(request),
     )
 
     captured: dict[str, object] = {}
@@ -1999,6 +2005,7 @@ async def v1_chat_completions(
         api_key=api_key,
         api_key_reservation=reservation,
         suppress_text_done_events=True,
+        client_ip=resolve_request_client_host(request),
     )
     startup_probe_timeout = (
         _CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS
@@ -2084,6 +2091,7 @@ async def _stream_responses(
     forwarded_downstream_turn_state: str | None = None,
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
+    forwarded_client_ip: str | None = None,
     enforce_openai_sdk_contract: bool = True,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
@@ -2113,6 +2121,7 @@ async def _stream_responses(
     rate_limit_headers = await context.service.rate_limit_headers() if include_rate_limit_headers else {}
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     effective_headers = forwarded_headers or request.headers
+    client_ip = forwarded_client_ip if forwarded_request else resolve_request_client_host(request)
     downstream_turn_state = (
         forwarded_downstream_turn_state
         if bridge_active and forwarded_downstream_turn_state is not None
@@ -2157,6 +2166,7 @@ async def _stream_responses(
                     openai_cache_affinity=openai_cache_affinity,
                     api_key=api_key,
                     api_key_reservation=reservation,
+                    client_ip=client_ip,
                 )
             except NotImplementedError:
                 error = OpenAIErrorEnvelopeModel(
@@ -2220,6 +2230,7 @@ async def _stream_responses(
             forwarded_request=forwarded_request,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            client_ip=client_ip,
         )
     else:
         stream = context.service.stream_responses(
@@ -2231,6 +2242,7 @@ async def _stream_responses(
             api_key=api_key,
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
+            client_ip=client_ip,
         )
     stream, startup_error = await _probe_stream_startup_error(
         stream,
@@ -2311,6 +2323,7 @@ async def _collect_responses(
     downstream_turn_state = (
         proxy_affinity_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
     )
+    client_ip = resolve_request_client_host(request)
     turn_state_headers = (
         proxy_affinity_module.build_downstream_turn_state_response_headers(downstream_turn_state)
         if downstream_turn_state is not None
@@ -2328,6 +2341,7 @@ async def _collect_responses(
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
             downstream_turn_state=downstream_turn_state,
+            client_ip=client_ip,
         )
     else:
         stream = context.service.stream_responses(
@@ -2339,6 +2353,7 @@ async def _collect_responses(
             api_key=api_key,
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
+            client_ip=client_ip,
         )
     try:
         response_payload = await _collect_responses_payload(stream)
@@ -2447,6 +2462,7 @@ async def _compact_responses(
             openai_cache_affinity=openai_cache_affinity,
             api_key=api_key,
             api_key_reservation=reservation,
+            client_ip=resolve_request_client_host(request),
         )
     except NotImplementedError:
         error = OpenAIErrorEnvelopeModel(

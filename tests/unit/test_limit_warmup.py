@@ -175,6 +175,7 @@ class FakeRequestLogsRepo:
         source: str | None = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
+        client_ip: str | None = None,
         failure_phase: str | None = None,
         failure_detail: str | None = None,
         failure_exception_type: str | None = None,
@@ -214,6 +215,7 @@ class FakeRequestLogsRepo:
                 "source": source,
                 "useragent": useragent,
                 "useragent_group": useragent_group,
+                "client_ip": client_ip,
                 "failure_phase": failure_phase,
                 "failure_detail": failure_detail,
                 "failure_exception_type": failure_exception_type,
@@ -231,7 +233,7 @@ class FakeRequestLogsRepo:
 
 
 @pytest.mark.asyncio
-async def test_fake_request_logs_repo_accepts_useragent_fields() -> None:
+async def test_fake_request_logs_repo_accepts_request_log_metadata_fields() -> None:
     repo = FakeRequestLogsRepo()
 
     await repo.add_log(
@@ -245,6 +247,7 @@ async def test_fake_request_logs_repo_accepts_useragent_fields() -> None:
         error_code=None,
         useragent="codex-lb-limit-warmup",
         useragent_group="internal",
+        client_ip="203.0.113.9",
     )
 
     assert repo.logs == [
@@ -271,6 +274,9 @@ async def test_fake_request_logs_repo_accepts_useragent_fields() -> None:
             "session_id": None,
             "plan_type": None,
             "source": None,
+            "useragent": "codex-lb-limit-warmup",
+            "useragent_group": "internal",
+            "client_ip": "203.0.113.9",
             "failure_phase": None,
             "failure_detail": None,
             "failure_exception_type": None,
@@ -283,8 +289,6 @@ async def test_fake_request_logs_repo_accepts_useragent_fields() -> None:
             "upstream_proxy_endpoint_id": None,
             "upstream_proxy_fallback_used": None,
             "upstream_proxy_fail_closed_reason": None,
-            "useragent": "codex-lb-limit-warmup",
-            "useragent_group": "internal",
         }
     ]
 

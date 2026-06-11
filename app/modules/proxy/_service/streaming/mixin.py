@@ -434,6 +434,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         suppress_text_done_events: bool = False,
         request_transport: str = _REQUEST_TRANSPORT_HTTP,
+        client_ip: str | None = None,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
         _maybe_log_proxy_request_payload("stream", payload, headers)
@@ -448,6 +449,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=suppress_text_done_events,
             request_transport=request_transport,
+            client_ip=client_ip,
         )
 
     async def _resolve_upstream_route_for_account(
@@ -508,6 +510,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         request_transport: str,
         useragent: str | None = None,
         useragent_group: str | None = None,
+        client_ip: str | None = None,
         preferred_account_id: str | None = None,
         tool_call_dedupe: _WebSocketUpstreamControl | None = None,
     ) -> AsyncIterator[str]:
@@ -1029,6 +1032,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
                 useragent=useragent,
                 useragent_group=useragent_group,
+                client_ip=client_ip,
             )
             _maybe_log_proxy_service_tier_trace(
                 "stream",

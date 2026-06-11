@@ -191,6 +191,7 @@ describe("RequestLogsResponseSchema", () => {
           transport: "websocket",
           useragent: "Mozilla/5.0",
           useragentGroup: "Mozilla",
+          clientIp: "203.0.113.7",
           status: "ok",
           errorCode: null,
           errorMessage: null,
@@ -226,6 +227,7 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.transport).toBe("websocket");
     expect(parsed.requests[0]?.useragent).toBe("Mozilla/5.0");
     expect(parsed.requests[0]?.useragentGroup).toBe("Mozilla");
+    expect(parsed.requests[0]?.clientIp).toBe("203.0.113.7");
     expect(parsed.requests[0]?.failurePhase).toBe("status");
     expect(parsed.requests[0]?.failureDetail).toBe("upstream_5xx");
     expect(parsed.requests[0]?.failureExceptionType).toBe("ProxyResponseError");
@@ -302,6 +304,7 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.apiKeyName).toBeNull();
     expect(parsed.requests[0]?.useragent).toBeNull();
     expect(parsed.requests[0]?.useragentGroup).toBeNull();
+    expect(parsed.requests[0]?.clientIp).toBeNull();
   });
 
   it("accepts nullable user agent fields", () => {
@@ -318,6 +321,7 @@ describe("RequestLogsResponseSchema", () => {
           transport: "websocket",
           useragent: null,
           useragentGroup: null,
+          clientIp: null,
           status: "ok",
           errorCode: null,
           errorMessage: null,
@@ -334,6 +338,7 @@ describe("RequestLogsResponseSchema", () => {
 
     expect(parsed.requests[0]?.useragent).toBeNull();
     expect(parsed.requests[0]?.useragentGroup).toBeNull();
+    expect(parsed.requests[0]?.clientIp).toBeNull();
   });
 
   it("defaults omitted nested cost breakdown fields to null", () => {

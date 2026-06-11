@@ -325,6 +325,7 @@ class _WebSocketRequestState:
     upstream_proxy_fail_closed_reason: str | None = None
     useragent: str | None = None
     useragent_group: str | None = None
+    client_ip: str | None = None
     downstream_visible: bool = False
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None

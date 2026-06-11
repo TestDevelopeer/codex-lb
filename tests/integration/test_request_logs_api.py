@@ -146,6 +146,7 @@ async def test_request_logs_api_returns_useragent_fields(async_client, db_setup)
             requested_at=now,
             useragent="opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
             useragent_group="opencode",
+            client_ip="203.0.113.7",
         )
         await logs_repo.add_log(
             account_id="acc_logs_useragent",
@@ -170,10 +171,12 @@ async def test_request_logs_api_returns_useragent_fields(async_client, db_setup)
     latest = payload[0]
     assert latest["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
     assert latest["useragentGroup"] == "opencode"
+    assert latest["clientIp"] == "203.0.113.7"
 
     older = payload[1]
     assert older["useragent"] is None
     assert older["useragentGroup"] is None
+    assert older["clientIp"] is None
 
 
 @pytest.mark.asyncio

@@ -277,6 +277,7 @@ class _HTTPBridgeStreamingMixin:
         forwarded_request: bool = False,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
+        client_ip: str | None = None,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
         proxy_api_authorization = _header_value_case_insensitive(headers, "authorization")
@@ -295,6 +296,7 @@ class _HTTPBridgeStreamingMixin:
             proxy_api_authorization=proxy_api_authorization,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            client_ip=client_ip,
         )
 
     async def _stream_http_bridge_or_retry(
@@ -313,6 +315,7 @@ class _HTTPBridgeStreamingMixin:
         proxy_api_authorization: str | None = None,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
+        client_ip: str | None = None,
     ) -> AsyncIterator[str]:
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
@@ -357,6 +360,7 @@ class _HTTPBridgeStreamingMixin:
                 request_transport=_REQUEST_TRANSPORT_HTTP,
                 rewritten_file_account_id=rewritten_file_account_id,
                 upstream_stream_transport_override=force_upstream_stream_transport,
+                client_ip=client_ip,
             ):
                 yield line
             return
@@ -381,6 +385,7 @@ class _HTTPBridgeStreamingMixin:
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
             rewritten_file_account_id=rewritten_file_account_id,
+            client_ip=client_ip,
         ):
             yield line
 
@@ -406,6 +411,7 @@ class _HTTPBridgeStreamingMixin:
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
         rewritten_file_account_id: str | None = None,
+        client_ip: str | None = None,
     ) -> AsyncIterator[str]:
         del suppress_text_done_events
         request_id = ensure_request_id()
@@ -504,6 +510,7 @@ class _HTTPBridgeStreamingMixin:
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
                     request_id=request_id,
+                    client_ip=client_ip,
                 )
                 del _fresh_request_state
                 _log_http_bridge_event(
@@ -543,6 +550,7 @@ class _HTTPBridgeStreamingMixin:
             api_key=api_key,
             api_key_reservation=api_key_reservation,
             request_id=request_id,
+            client_ip=client_ip,
         )
         if downstream_turn_state is not None:
             request_state.session_id = _normalize_session_id(downstream_turn_state)
@@ -696,6 +704,7 @@ class _HTTPBridgeStreamingMixin:
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
                     request_id=request_id,
+                    client_ip=client_ip,
                 )
                 if downstream_turn_state is not None:
                     request_state.session_id = _normalize_session_id(downstream_turn_state)
@@ -736,6 +745,7 @@ class _HTTPBridgeStreamingMixin:
                     downstream_turn_state=downstream_turn_state,
                     request_started_at=request_state.started_at,
                     proxy_api_authorization=proxy_api_authorization,
+                    client_ip=client_ip,
                 ):
                     forwarded_any = True
                     yield line
@@ -866,6 +876,7 @@ class _HTTPBridgeStreamingMixin:
                         api_key=api_key,
                         api_key_reservation=retry_api_key_reservation,
                         request_id=request_id,
+                        client_ip=client_ip,
                     )
                     if downstream_turn_state is not None:
                         retry_request_state.session_id = _normalize_session_id(downstream_turn_state)
@@ -959,6 +970,7 @@ class _HTTPBridgeStreamingMixin:
                 api_key=api_key,
                 api_key_reservation=api_key_reservation,
                 request_id=request_id,
+                client_ip=client_ip,
             )
             request_state.transport = _REQUEST_TRANSPORT_HTTP
             request_state.request_stage = _http_bridge_request_stage(
@@ -1009,6 +1021,7 @@ class _HTTPBridgeStreamingMixin:
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
                     request_id=request_id,
+                    client_ip=client_ip,
                 )
                 if downstream_turn_state is not None:
                     request_state.session_id = _normalize_session_id(downstream_turn_state)
@@ -1335,6 +1348,7 @@ class _HTTPBridgeStreamingMixin:
                     api_key=api_key,
                     api_key_reservation=retry_api_key_reservation,
                     request_id=request_id,
+                    client_ip=client_ip,
                 )
                 if downstream_turn_state is not None:
                     retry_request_state.session_id = _normalize_session_id(downstream_turn_state)

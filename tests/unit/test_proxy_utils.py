@@ -6212,10 +6212,12 @@ async def test_compact_responses_persists_useragent_fields_in_request_log(monkey
     await service.compact_responses(
         payload,
         {"session_id": "sid-compact", "User-Agent": "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"},
+        client_ip="203.0.113.7",
     )
 
     assert request_logs.calls[0]["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
     assert request_logs.calls[0]["useragent_group"] == "opencode"
+    assert request_logs.calls[0]["client_ip"] == "203.0.113.7"
 
 
 @pytest.mark.asyncio
