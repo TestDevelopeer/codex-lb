@@ -487,7 +487,12 @@ async def test_oauth_persist_tokens_invalidates_routing_caches_after_identity_me
         )
     )
 
-    repo.upsert_account_slot.assert_awaited_once()
+    repo.upsert.assert_awaited_once()
+    _, upsert_kwargs = repo.upsert.await_args
+    assert upsert_kwargs == {
+        "merge_by_email": False,
+        "merge_by_chatgpt_identity": True,
+    }
     assert account_cache.invalidated is True
     assert api_key_cache.cleared is True
     assert poller.bumped == ["api_key"]
