@@ -211,3 +211,186 @@ def test_main_fails_apply_errors_even_with_read_error_tolerance(
     captured = capsys.readouterr()
     assert result == 1
     assert "Soju06/codex-lb#714: gh: HTTP 500 while writing labels" in captured.err
+
+
+def test_pull_review_comment_nodes_uses_original_commit_or_head_reference(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+    head_sha = "a" * 40
+    old_sha = "b" * 40
+    comment_data = [
+        {
+            "body": "this review is on old code only",
+            "commit_id": head_sha,
+            "original_commit_id": old_sha,
+            "pull_request_review_id": 1,
+            "created_at": "2026-06-11T00:00:00Z",
+            "html_url": "https://github.com/Soju06/codex-lb/pull/714#discussion_r1",
+            "user": {"login": "openai-codex"},
+        },
+        {
+            "body": f"stale but mentions head commit {head_sha[:12]}",
+            "commit_id": head_sha,
+            "original_commit_id": old_sha,
+            "pull_request_review_id": 2,
+            "created_at": "2026-06-11T00:00:00Z",
+            "html_url": "https://github.com/Soju06/codex-lb/pull/714#discussion_r2",
+            "user": {"login": "openai-codex"},
+        },
+        {
+            "body": "actual current-head inline review",
+            "commit_id": old_sha,
+            "original_commit_id": head_sha,
+            "pull_request_review_id": 3,
+            "created_at": "2026-06-11T00:00:00Z",
+            "html_url": "https://github.com/Soju06/codex-lb/pull/714#discussion_r3",
+            "user": {"login": "openai-codex"},
+        },
+        {
+            "body": "older unrelated comment",
+            "commit_id": old_sha,
+            "original_commit_id": old_sha,
+            "pull_request_review_id": 4,
+            "created_at": "2026-06-11T00:00:00Z",
+            "html_url": "https://github.com/Soju06/codex-lb/pull/714#discussion_r4",
+            "user": {"login": "openai-codex"},
+        },
+    ]
+
+    monkeypatch.setattr(module, "paged_api", lambda _path: comment_data)
+
+    nodes = module.pull_review_comment_nodes("Soju06/codex-lb", 714, head_sha=head_sha)
+
+    assert [node.get("commit", {}).get("oid") for node in nodes] == [head_sha, head_sha]
+    assert [node.get("pullRequestReviewDatabaseId") for node in nodes] == [None, 3]
+
+
+def test_head_mentioned_fallback_comment_keeps_timeline_chronology() -> None:
+    module = load_sync_module()
+    head_sha = "a" * 40
+    review_id = 2
+    timeline_nodes = [
+        {
+            "__typename": "PullRequestCommit",
+            "commit": {"oid": head_sha},
+            "committedDate": "2026-06-11T06:30:00Z",
+        },
+        {
+            "__typename": "PullRequestReview",
+            "databaseId": review_id,
+            "author": {"login": "openai-codex"},
+            "bodyText": "Reviewed older commit.",
+            "submittedAt": "2026-06-11T06:32:00Z",
+            "commit": {"oid": "b" * 40},
+        },
+        {
+            "__typename": "IssueComment",
+            "author": {"login": "openai-codex"},
+            "bodyText": "Codex Review: Didn't find any major issues.",
+            "createdAt": "2026-06-11T06:40:00Z",
+        },
+    ]
+    comment_nodes = [
+        {
+            "__typename": "PullRequestReviewComment",
+            "author": {"login": "openai-codex"},
+            "bodyText": f"**[P2]** stale finding mentioning {head_sha[:12]}",
+            "createdAt": "2026-06-11T06:34:00Z",
+            "commit": {"oid": head_sha},
+            "pullRequestReviewDatabaseId": None,
+        }
+    ]
+
+    merged = module.merge_review_comment_nodes(timeline_nodes, comment_nodes)
+    assert [node["__typename"] for node in merged] == [
+        "PullRequestCommit",
+        "PullRequestReview",
+        "PullRequestReviewComment",
+        "IssueComment",
+    ]
+
+    state, node = module.find_current_head_codex_review_state(
+        merged,
+        head_sha=head_sha,
+        allowed_authors={"openai-codex"},
+    )
+
+    assert state == "clean"
+    assert node is timeline_nodes[-1]
+
+
+def test_unresolved_codex_threads_filter_to_current_head(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_sync_module()
+    head_sha = "a" * 40
+    old_sha = "b" * 40
+
+    pages = [
+        {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            "nodes": [
+                                {
+                                    "isResolved": False,
+                                    "isOutdated": False,
+                                    "comments": {
+                                        "nodes": [
+                                            {
+                                                "author": {"login": "openai-codex"},
+                                                "body": "**[P1]** old finding",
+                                                "url": "https://example.invalid/stale",
+                                                "commit": {"oid": head_sha},
+                                                "originalCommit": {"oid": old_sha},
+                                            }
+                                        ]
+                                    },
+                                },
+                                {
+                                    "isResolved": False,
+                                    "isOutdated": False,
+                                    "comments": {
+                                        "nodes": [
+                                            {
+                                                "author": {"login": "openai-codex"},
+                                                "body": "**[P1]** current finding",
+                                                "url": "https://example.invalid/current",
+                                                "commit": {"oid": head_sha},
+                                                "originalCommit": {"oid": head_sha},
+                                            }
+                                        ]
+                                    },
+                                },
+                                {
+                                    "isResolved": False,
+                                    "isOutdated": False,
+                                    "comments": {
+                                        "nodes": [
+                                            {
+                                                "author": {"login": "openai-codex"},
+                                                "body": f"**[P2]** stale fallback for {head_sha[:12]}",
+                                                "url": "https://example.invalid/fallback",
+                                                "commit": {"oid": head_sha},
+                                                "originalCommit": {"oid": old_sha},
+                                            }
+                                        ]
+                                    },
+                                },
+                            ],
+                        }
+                    }
+                }
+            }
+        }
+    ]
+
+    monkeypatch.setattr(module, "graphql", lambda *_args, **_kwargs: pages[0])
+
+    urls = module.unresolved_codex_finding_thread_urls(
+        "Soju06/codex-lb",
+        714,
+        head_sha=head_sha,
+        allowed_authors={"openai-codex"},
+    )
+
+    assert urls == ("https://example.invalid/current", "https://example.invalid/fallback")
