@@ -644,6 +644,7 @@ class AccountsRepository:
             select(Account)
             .where(Account.email == email)
             .where(Account.workspace_id.is_(None))
+            .where(Account.workspace_label.is_(None))
             .order_by(Account.created_at.asc(), Account.id.asc())
             .limit(2)
         )

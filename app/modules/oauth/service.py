@@ -596,39 +596,15 @@ class OauthService:
         )
         if self._repo_factory:
             async with self._repo_factory() as repo:
-                if account.workspace_id or account.workspace_label:
-                    await repo.upsert_account_slot(
-                        account,
-                        preserve_unknown_workspace_duplicates=False,
-                    )
-                elif account.chatgpt_account_id:
-                    await repo.upsert(
-                        account,
-                        merge_by_email=False,
-                        merge_by_chatgpt_identity=True,
-                    )
-                else:
-                    await repo.upsert_account_slot(
-                        account,
-                        preserve_unknown_workspace_duplicates=False,
-                    )
+                await repo.upsert_account_slot(
+                    account,
+                    preserve_unknown_workspace_duplicates=False,
+                )
         else:
-            if account.workspace_id or account.workspace_label:
-                await self._accounts_repo.upsert_account_slot(
-                    account,
-                    preserve_unknown_workspace_duplicates=False,
-                )
-            elif account.chatgpt_account_id:
-                await self._accounts_repo.upsert(
-                    account,
-                    merge_by_email=False,
-                    merge_by_chatgpt_identity=True,
-                )
-            else:
-                await self._accounts_repo.upsert_account_slot(
-                    account,
-                    preserve_unknown_workspace_duplicates=False,
-                )
+            await self._accounts_repo.upsert_account_slot(
+                account,
+                preserve_unknown_workspace_duplicates=False,
+            )
 
         await self._invalidate_account_routing_caches()
 
