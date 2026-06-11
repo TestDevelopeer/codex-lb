@@ -317,8 +317,6 @@ class AccountsRepository:
         """
 
         stmt = select(Account).where(Account.chatgpt_account_id == chatgpt_account_id)
-        if email:
-            stmt = stmt.where(Account.email == email)
         order_by: list[Any] = [Account.created_at.asc(), Account.id.asc()]
         if workspace_id:
             stmt = stmt.where(or_(Account.workspace_id == workspace_id, Account.workspace_id.is_(None)))

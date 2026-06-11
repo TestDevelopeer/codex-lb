@@ -429,6 +429,30 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_reuses_deactivated_row(
 
 
 @pytest.mark.asyncio
+async def test_accounts_upsert_merge_by_chatgpt_identity_reuses_row_when_email_changes(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        original = _make_account_with_chatgpt_id("acc_email_change", "old-email@example.com", "chatgpt_email_change")
+        await repo.upsert(original, merge_by_email=False)
+
+        reauth = _make_account_with_chatgpt_id("acc_email_change", "new-email@example.com", "chatgpt_email_change")
+        reauth.plan_type = "team"
+        saved = await repo.upsert(reauth, merge_by_email=False, merge_by_chatgpt_identity=True)
+
+        assert saved.id == "acc_email_change"
+        assert saved.email == "new-email@example.com"
+        assert saved.plan_type == "team"
+        rows = list(
+            (await session.execute(select(Account).where(Account.chatgpt_account_id == "chatgpt_email_change")))
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].id == "acc_email_change"
+
+
+@pytest.mark.asyncio
 async def test_accounts_upsert_merge_by_chatgpt_identity_picks_oldest_canonical(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)

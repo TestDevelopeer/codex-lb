@@ -499,6 +499,43 @@ async def test_oauth_persist_tokens_invalidates_routing_caches_after_identity_me
 
 
 @pytest.mark.asyncio
+async def test_oauth_persist_tokens_uses_slot_upsert_for_label_only_workspace(monkeypatch):
+    repo = AsyncMock()
+    service = oauth_module.OauthService(repo)
+    monkeypatch.setattr(
+        oauth_module,
+        "get_account_selection_cache",
+        lambda: SimpleNamespace(invalidate=lambda: None),
+        raising=False,
+    )
+    monkeypatch.setattr(oauth_module, "get_api_key_cache", lambda: SimpleNamespace(clear=lambda: None), raising=False)
+    monkeypatch.setattr(oauth_module, "get_cache_invalidation_poller", lambda: None, raising=False)
+
+    payload = {
+        "email": "label-workspace@example.com",
+        "chatgpt_account_id": "acc_label_workspace",
+        "https://api.openai.com/auth": {
+            "workspace_label": "Label Only Workspace",
+            "chatgpt_plan_type": "plus",
+        },
+    }
+
+    await service._persist_tokens(
+        OAuthTokens(
+            access_token="access-token",
+            refresh_token="refresh-token",
+            id_token=_encode_jwt(payload),
+        )
+    )
+
+    repo.upsert.assert_not_awaited()
+    repo.upsert_account_slot.assert_awaited_once()
+    saved_account = repo.upsert_account_slot.await_args.args[0]
+    assert saved_account.workspace_label == "Label Only Workspace"
+    assert repo.upsert_account_slot.await_args.kwargs == {"preserve_unknown_workspace_duplicates": False}
+
+
+@pytest.mark.asyncio
 async def test_device_oauth_flow_keeps_same_email_distinct_upstream_identities_in_overwrite_mode(
     async_client,
     monkeypatch,
