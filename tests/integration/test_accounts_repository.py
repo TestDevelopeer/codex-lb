@@ -153,6 +153,45 @@ async def test_upsert_account_slot_preserves_same_chatgpt_id_across_workspace_id
 
 
 @pytest.mark.asyncio
+async def test_upsert_account_slot_adds_third_workspace_slot_for_same_email(db_setup):
+    del db_setup
+    first = _account(
+        "mavos_primary",
+        chatgpt_account_id="chatgpt_mavos_primary",
+        email="operator@example.com",
+        workspace_id="ws_mavos_primary",
+    )
+    second = _account(
+        "mavos_secondary",
+        chatgpt_account_id="chatgpt_mavos_secondary",
+        email="operator@example.com",
+        workspace_id="ws_mavos_secondary",
+    )
+    third = _account(
+        "mavos_tertiary",
+        chatgpt_account_id="chatgpt_mavos_tertiary",
+        email="operator@example.com",
+        workspace_id="ws_mavos_tertiary",
+    )
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        saved_first = await repo.upsert_account_slot(first, preserve_unknown_workspace_duplicates=False)
+        saved_second = await repo.upsert_account_slot(second, preserve_unknown_workspace_duplicates=False)
+        saved_third = await repo.upsert_account_slot(third, preserve_unknown_workspace_duplicates=False)
+        accounts = await repo.list_accounts()
+
+    assert saved_first.id == "mavos_primary"
+    assert saved_second.id == "mavos_secondary"
+    assert saved_third.id == "mavos_tertiary"
+    assert [(account.id, account.workspace_id) for account in accounts] == [
+        ("mavos_primary", "ws_mavos_primary"),
+        ("mavos_secondary", "ws_mavos_secondary"),
+        ("mavos_tertiary", "ws_mavos_tertiary"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_upsert_account_slot_preserves_same_chatgpt_id_across_workspace_labels(db_setup):
     del db_setup
     first = _account(
