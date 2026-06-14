@@ -24,4 +24,3 @@ current head.
 - **Spec**: `github-automation`
 - **Code**: `.github/scripts/sync_codex_ok_labels.py`
 - **Tests**: `tests/unit/test_sync_codex_ok_labels.py`
-

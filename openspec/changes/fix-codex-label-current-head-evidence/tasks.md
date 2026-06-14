@@ -14,4 +14,3 @@
 
 - [x] 3.1 Run focused unit tests for the synchronizer.
 - [x] 3.2 Run ruff format/check and ty on the synchronizer and tests.
-

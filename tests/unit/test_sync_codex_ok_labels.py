@@ -348,6 +348,7 @@ def test_pull_review_comment_nodes_uses_original_commit_or_head_reference(monkey
     ]
 
     monkeypatch.setattr(module, "paged_api", lambda _path: comment_data)
+    monkeypatch.setattr(module, "unresolved_review_comment_urls", lambda *_args: set())
 
     nodes = module.pull_review_comment_nodes("Soju06/codex-lb", 714, head_sha=head_sha)
 
@@ -518,3 +519,57 @@ def test_unresolved_codex_threads_filter_to_current_head(monkeypatch: pytest.Mon
         "https://example.invalid/current",
         "https://example.invalid/fallback",
     )
+
+
+def test_resolved_inline_codex_finding_does_not_count_as_review_news(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_sync_module()
+
+    monkeypatch.setattr(
+        module,
+        "paged_api",
+        lambda _path: [
+            {
+                "body": "**P1 Badge** resolved finding",
+                "commit_id": "a" * 40,
+                "original_commit_id": "a" * 40,
+                "pull_request_review_id": 123,
+                "html_url": "https://github.test/review/resolved",
+                "created_at": "2026-06-14T00:00:00Z",
+                "user": {"login": "chatgpt-codex-connector"},
+            }
+        ],
+    )
+    monkeypatch.setattr(module, "unresolved_review_comment_urls", lambda *_args: set())
+
+    assert module.pull_review_comment_nodes("Soju06/codex-lb", 714, head_sha="a" * 40) == []
+
+
+def test_unresolved_inline_codex_finding_counts_as_review_news(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_sync_module()
+    url = "https://github.test/review/unresolved"
+
+    monkeypatch.setattr(
+        module,
+        "paged_api",
+        lambda _path: [
+            {
+                "body": "**P1 Badge** unresolved finding",
+                "commit_id": "a" * 40,
+                "original_commit_id": "a" * 40,
+                "pull_request_review_id": 123,
+                "html_url": url,
+                "created_at": "2026-06-14T00:00:00Z",
+                "user": {"login": "chatgpt-codex-connector"},
+            }
+        ],
+    )
+    monkeypatch.setattr(module, "unresolved_review_comment_urls", lambda *_args: {url})
+
+    nodes = module.pull_review_comment_nodes("Soju06/codex-lb", 714, head_sha="a" * 40)
+
+    assert len(nodes) == 1
+    assert nodes[0]["url"] == url

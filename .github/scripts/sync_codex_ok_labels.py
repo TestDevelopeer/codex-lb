@@ -387,8 +387,57 @@ def timeline_node_timestamp(node: dict[str, Any]) -> str | None:
     return None
 
 
+def unresolved_review_comment_urls(repo: str, number: int) -> set[str]:
+    owner, name = repo.split("/", 1)
+    after: str | None = None
+    urls: set[str] = set()
+
+    while True:
+        fields: dict[str, object] = {"owner": owner, "name": name, "number": number}
+        if after is not None:
+            fields["after"] = after
+        payload = graphql(PR_REVIEW_THREADS_QUERY, **fields)
+        pr = payload.get("data", {}).get("repository", {}).get("pullRequest")
+        if not isinstance(pr, dict):
+            raise GhError(f"{repo}#{number}: GraphQL did not return a pull request")
+
+        threads = pr.get("reviewThreads")
+        if not isinstance(threads, dict):
+            raise GhError(f"{repo}#{number}: GraphQL did not return review threads")
+        nodes = threads.get("nodes", [])
+        if not isinstance(nodes, list):
+            raise GhError(f"{repo}#{number}: GraphQL did not return review thread nodes")
+
+        for thread in nodes:
+            if not isinstance(thread, dict):
+                continue
+            if thread.get("isResolved") or thread.get("isOutdated"):
+                continue
+            comments = thread.get("comments")
+            comment_nodes = comments.get("nodes") if isinstance(comments, dict) else []
+            if not isinstance(comment_nodes, list):
+                continue
+            for comment in comment_nodes:
+                if not isinstance(comment, dict):
+                    continue
+                url = comment.get("url")
+                if isinstance(url, str):
+                    urls.add(url)
+
+        page_info = threads.get("pageInfo")
+        if not isinstance(page_info, dict) or not page_info.get("hasNextPage"):
+            break
+        end_cursor = page_info.get("endCursor")
+        if not isinstance(end_cursor, str) or not end_cursor:
+            break
+        after = end_cursor
+
+    return urls
+
+
 def pull_review_comment_nodes(repo: str, number: int, *, head_sha: str) -> list[dict[str, Any]]:
     comments = paged_api(f"/repos/{repo}/pulls/{number}/comments")
+    unresolved_urls = unresolved_review_comment_urls(repo, number)
     nodes: list[dict[str, Any]] = []
     for comment in comments:
         body = comment.get("body")
@@ -402,6 +451,9 @@ def pull_review_comment_nodes(repo: str, number: int, *, head_sha: str) -> list[
             continue
         effective_commit_id = original_commit_id if original_matches_head else commit_id
         effective_review_id = review_id if original_matches_head else None
+        html_url = comment.get("html_url") or comment.get("url")
+        if is_needs_work_codex_body(body) and html_url not in unresolved_urls:
+            continue
         user = comment.get("user")
         login = user.get("login") if isinstance(user, dict) else None
         nodes.append(
@@ -410,7 +462,7 @@ def pull_review_comment_nodes(repo: str, number: int, *, head_sha: str) -> list[
                 "author": {"login": login} if isinstance(login, str) else None,
                 "bodyText": body,
                 "createdAt": comment.get("created_at"),
-                "url": comment.get("html_url") or comment.get("url"),
+                "url": html_url,
                 "commit": {"oid": effective_commit_id} if isinstance(effective_commit_id, str) else None,
                 "pullRequestReviewDatabaseId": effective_review_id if isinstance(effective_review_id, int) else None,
             }
