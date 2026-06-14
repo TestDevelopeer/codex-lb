@@ -149,6 +149,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    _sleep_for_account_selection_recovery,
     _WebSocketRequestState,
     _WebSocketUpstreamControl,
 )
@@ -2183,6 +2184,30 @@ class _HTTPBridgeMixin(
                 await release_selected_account_lease()
                 if reuse_current_account_lease and _remaining_budget_seconds(deadline) > 0:
                     preferred_candidate_id = None
+                    continue
+                if await _sleep_for_account_selection_recovery(
+                    selection,
+                    request_id=request_state.request_log_id or request_state.request_id,
+                    kind="http_bridge",
+                    request_stage="reattach",
+                    model=session.request_model,
+                    request_state=request_state,
+                ):
+                    deadline = _service_time().monotonic() + _service_get_settings().proxy_request_budget_seconds
+                    excluded_account_ids = set(request_state.excluded_account_ids)
+                    if skip_same_account:
+                        excluded_account_ids.add(session.account.id)
+                    retry_same_account_once = not skip_same_account and session.account.id not in excluded_account_ids
+                    if skip_same_account:
+                        preferred_candidate_id = None
+                    elif forced_refresh_account_id is not None:
+                        preferred_candidate_id = forced_refresh_account_id
+                    elif request_state.preferred_account_id is not None:
+                        preferred_candidate_id = request_state.preferred_account_id
+                    elif session.account.id not in excluded_account_ids:
+                        preferred_candidate_id = session.account.id
+                    else:
+                        preferred_candidate_id = None
                     continue
                 _record_same_account_takeover(
                     preferred_account_id=session.account.id,

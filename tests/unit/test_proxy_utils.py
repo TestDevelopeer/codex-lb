@@ -6,7 +6,7 @@ import logging
 import ssl
 import time
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from types import SimpleNamespace
 from typing import Any, Iterator, Protocol, Self, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -44,6 +44,13 @@ from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service import support as proxy_support
+from app.modules.proxy._service.streaming import retry as streaming_retry_module
+from app.modules.proxy._service.support import (
+    _account_capacity_wait_payload,
+    _account_selection_recovery_sleep_seconds,
+)
+from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection, RuntimeState, SelectionInputs
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
@@ -51,6 +58,64 @@ from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.unit
+
+
+def test_account_selection_recovery_sleep_uses_retry_hint_with_bounds():
+    selection = AccountSelection(
+        account=None,
+        error_message="Rate limit exceeded. Try again in 9999s",
+        error_code="no_accounts",
+    )
+
+    assert _account_selection_recovery_sleep_seconds(selection) == 300.0
+
+
+def test_account_selection_recovery_sleep_uses_default_for_no_available_accounts():
+    selection = AccountSelection(account=None, error_message="No available accounts", error_code="no_accounts")
+
+    assert _account_selection_recovery_sleep_seconds(selection) == 30.0
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "All accounts require re-authentication",
+        "All accounts are paused",
+        "No accounts with a plan matching this model",
+        "No accounts with available additional quota",
+        "No fresh additional quota data",
+    ],
+)
+def test_account_selection_recovery_sleep_ignores_permanent_selection_failures(message: str):
+    selection = AccountSelection(account=None, error_message=message, error_code="no_accounts")
+
+    assert _account_selection_recovery_sleep_seconds(selection) is None
+
+
+def test_account_capacity_wait_payload_reports_status_and_wait_time(monkeypatch):
+    monkeypatch.setattr(proxy_support.time, "monotonic", lambda: 125.4)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_capacity_wait",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=100.0,
+    )
+    request_state.account_capacity_wait_started_at = 100.0
+
+    payload = _account_capacity_wait_payload(
+        request_state,
+        request_id="req_capacity_wait",
+        reason="Rate limit exceeded. Try again in 120s",
+        retry_after_seconds=119.8,
+    )
+
+    assert payload["type"] == "codex.keepalive"
+    assert payload["status"] == "waiting_for_account_capacity"
+    assert payload["request_id"] == "req_capacity_wait"
+    assert payload["waited_seconds"] == 25
+    assert payload["retry_after_seconds"] == 119
 
 
 def test_relative_availability_settings_default_when_stored_values_are_null():
@@ -6225,6 +6290,70 @@ async def test_stream_responses_propagates_selection_error_code(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stream_with_retry_keeps_sse_alive_while_account_capacity_recovers(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_capacity_recovers")
+    selections: list[dict[str, object]] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        streaming_retry_module,
+        "_account_selection_recovery_sleep_seconds",
+        lambda _selection: 0.001,
+    )
+    monkeypatch.setattr(streaming_retry_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        selections.append(kwargs)
+        if len(selections) == 1:
+            return AccountSelection(
+                account=None,
+                error_message="Rate limit exceeded. Try again in 120s",
+                error_code="no_accounts",
+            )
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_core_stream_responses(*_args: object, **_kwargs: object):
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_capacity_ok",'
+            '"usage":{"input_tokens":1,"output_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_core_stream_responses)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-capacity-recovers"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    keepalive = json.loads(chunks[0].split("data: ", 1)[1])
+    completed = json.loads(chunks[-1].split("data: ", 1)[1])
+
+    assert keepalive["type"] == "codex.keepalive"
+    assert keepalive["status"] == "waiting_for_account_capacity"
+    assert completed["type"] == "response.completed"
+    assert len(selections) == 2
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_first_idle_timeout_fails_over_to_next_account(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
@@ -9020,6 +9149,71 @@ async def test_select_websocket_connect_account_stream_cap_is_local_overload(mon
     assert sent_payload["status"] == 429
     assert sent_payload["error"]["code"] == "account_stream_cap"
     assert sent_payload["error"]["type"] == "rate_limit_error"
+
+
+@pytest.mark.asyncio
+async def test_select_websocket_connect_account_sends_capacity_keepalive_and_retries(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_capacity_wait",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    selected_account = _make_account("acc_ws_capacity_recovered")
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(
+                account=None,
+                error_message="Rate limit exceeded. Try again in 120s",
+                error_code="no_accounts",
+            ),
+            AccountSelection(account=selected_account, error_message=None),
+        ]
+    )
+
+    async def fake_sleep_for_account_selection_recovery(*_args: object, **kwargs: object) -> bool:
+        heartbeat = cast(Callable[[float], Any] | None, kwargs.get("heartbeat"))
+        assert heartbeat is not None
+        await heartbeat(0.001)
+        return True
+
+    websocket_send = AsyncMock()
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
+    monkeypatch.setattr(
+        websocket_mixin_module,
+        "_sleep_for_account_selection_recovery",
+        fake_sleep_for_account_selection_recovery,
+    )
+
+    result = await service._select_websocket_connect_account(
+        10_000.0,
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(WebSocket, SimpleNamespace(send_text=websocket_send)),
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        exclude_account_ids=set(),
+        preferred_account_id=None,
+        require_preferred_account=False,
+    )
+
+    assert result is selected_account
+    assert select_account.await_count == 2
+    await_args = websocket_send.await_args
+    assert await_args is not None
+    sent_payload = json.loads(await_args.args[0])
+    assert sent_payload["type"] == "codex.keepalive"
+    assert sent_payload["status"] == "waiting_for_account_capacity"
+    assert sent_payload["request_id"] == "ws_req_capacity_wait"
 
 
 @pytest.mark.asyncio

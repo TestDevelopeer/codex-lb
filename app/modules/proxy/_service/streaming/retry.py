@@ -26,6 +26,9 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.support import (
+    _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
+    _account_capacity_wait_payload,
+    _account_selection_recovery_sleep_seconds,
     _request_log_useragent_fields,
     _RetryableStreamError,
     _stream_settlement_error_payload,
@@ -313,6 +316,50 @@ class _StreamingRetryMixin:
                         )
                         require_security_work_authorized = False
                         continue
+                    if (
+                        not account
+                        and not _facade()._is_local_account_cap_code(selection.error_code)
+                        and not (require_preferred_account and preferred_account_id is not None)
+                        and not (propagate_http_errors and last_transient_exc is not None)
+                        and last_retryable_stream_error is None
+                        and last_security_work_retry_error is None
+                    ):
+                        recovery_sleep_seconds = _account_selection_recovery_sleep_seconds(selection)
+                        if recovery_sleep_seconds is not None:
+                            wait_started_at = time.monotonic()
+                            _facade().logger.info(
+                                "Waiting for an account to recover before retrying stream selection "
+                                "request_id=%s model=%s sleep_seconds=%.1f error=%s",
+                                request_id,
+                                payload.model,
+                                recovery_sleep_seconds,
+                                selection.error_message,
+                            )
+                            remaining_sleep_seconds = recovery_sleep_seconds
+                            while remaining_sleep_seconds > 0:
+                                yield format_sse_event(
+                                    cast(
+                                        Mapping[str, Any],
+                                        _account_capacity_wait_payload(
+                                            None,
+                                            request_id=request_id,
+                                            reason=selection.error_message,
+                                            retry_after_seconds=remaining_sleep_seconds,
+                                            started_at=wait_started_at,
+                                        ),
+                                    )
+                                )
+                                chunk_seconds = min(
+                                    remaining_sleep_seconds,
+                                    _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
+                                )
+                                await asyncio.sleep(chunk_seconds)
+                                remaining_sleep_seconds -= chunk_seconds
+                            deadline = time.monotonic() + _facade()._stream_request_budget_seconds(
+                                base_settings,
+                                request_transport=request_transport,
+                            )
+                            continue
                     break
                 if not account:
                     if _facade()._is_local_account_cap_code(selection.error_code):
