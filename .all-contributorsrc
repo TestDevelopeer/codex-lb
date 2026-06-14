@@ -716,6 +716,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "softkleenex",
+      "name": "softkleenex",
+      "avatar_url": "https://avatars.githubusercontent.com/u/92619941?v=4",
+      "profile": "https://github.com/softkleenex",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,
