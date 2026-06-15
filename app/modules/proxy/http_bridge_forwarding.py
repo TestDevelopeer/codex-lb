@@ -156,11 +156,7 @@ def build_owner_forward_headers(
         forwarded[HTTP_BRIDGE_RESERVATION_ID_HEADER] = context.reservation.reservation_id
         forwarded[HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER] = context.reservation.key_id
         forwarded[HTTP_BRIDGE_RESERVATION_MODEL_HEADER] = context.reservation.model
-    forwarded[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
-        payload=payload,
-        context=context,
-        include_client_ip=False,
-    )
+    forwarded[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(payload=payload, context=context)
     return forwarded
 
 
@@ -189,6 +185,8 @@ def parse_forwarded_request(
                 error_type="server_error",
             ),
         )
+    client_ip = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_HEADER))
+    client_ip_header_present = any(key.lower() == HTTP_BRIDGE_CLIENT_IP_HEADER for key in headers)
     context = HTTPBridgeForwardContext(
         origin_instance=headers.get(HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER, "").strip() or "unknown",
         target_instance=target_instance,
@@ -196,16 +194,18 @@ def parse_forwarded_request(
         downstream_turn_state=_optional_header(headers.get("x-codex-turn-state")),
         original_affinity_kind=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KIND_HEADER)),
         original_affinity_key=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KEY_HEADER)),
-        client_ip=_optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_HEADER)),
+        client_ip=client_ip,
         reservation=_reservation_from_headers(headers),
     )
     signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_HEADER))
     expected_signature = _bridge_forward_signature(payload=payload, context=context)
-    legacy_signature = _bridge_forward_signature(
-        payload=payload,
-        context=context,
-        include_client_ip=False,
-    )
+    legacy_signature = None
+    if not client_ip_header_present:
+        legacy_signature = _bridge_forward_signature(
+            payload=payload,
+            context=context,
+            include_client_ip=False,
+        )
     signature_valid = signature is not None and (
         hmac.compare_digest(signature, expected_signature)
         or (legacy_signature is not None and hmac.compare_digest(signature, legacy_signature))
