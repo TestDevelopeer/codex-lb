@@ -43,6 +43,13 @@ current commit, original commit, nor body text ties them to the current head.
 - **THEN** that thread blocks `🤖 codex: ok`
 - **AND** the synchronizer records a needs-work reason that links to the thread
 
+#### Scenario: resolved inline thread triggers label resynchronization
+
+- **GIVEN** a pull request has a `🤖 codex: needs work` label from an unresolved Codex inline finding
+- **WHEN** that review thread is resolved
+- **THEN** the Codex label synchronization workflow runs for that pull request
+- **AND** a scheduled fallback also resynchronizes open pull requests when no review-thread event is delivered
+
 ### Requirement: Codex label sync MUST use check-run recency evidence
 
 When multiple check runs have the same context name on a pull-request head, the label synchronizer MUST classify the current context from the newest run by
