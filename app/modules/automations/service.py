@@ -1363,7 +1363,7 @@ class AutomationsService:
             "partial": 0,
             "running": 0,
         }
-        for entry in latest_run_by_account_id.values():
+        for entry in account_states:
             if entry.status in status_counts:
                 status_counts[entry.status] += 1
         effective_status = _resolve_effective_status(
