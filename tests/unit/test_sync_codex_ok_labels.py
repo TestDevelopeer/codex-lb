@@ -310,7 +310,7 @@ def test_pull_review_comment_nodes_uses_original_commit_or_head_reference(monkey
     old_sha = "b" * 40
     comment_data = [
         {
-            "body": "this review is on old code only",
+            "body": "reanchored current-head inline review",
             "commit_id": head_sha,
             "original_commit_id": old_sha,
             "pull_request_review_id": 1,
@@ -352,8 +352,8 @@ def test_pull_review_comment_nodes_uses_original_commit_or_head_reference(monkey
 
     nodes = module.pull_review_comment_nodes("Soju06/codex-lb", 714, head_sha=head_sha)
 
-    assert [node.get("commit", {}).get("oid") for node in nodes] == [head_sha, head_sha]
-    assert [node.get("pullRequestReviewDatabaseId") for node in nodes] == [None, 3]
+    assert [node.get("commit", {}).get("oid") for node in nodes] == [head_sha, head_sha, head_sha]
+    assert [node.get("pullRequestReviewDatabaseId") for node in nodes] == [None, None, 3]
 
 
 def test_head_mentioned_fallback_comment_keeps_timeline_chronology() -> None:
@@ -430,8 +430,8 @@ def test_unresolved_codex_threads_filter_to_current_head(monkeypatch: pytest.Mon
                                         "nodes": [
                                             {
                                                 "author": {"login": "openai-codex"},
-                                                "body": "**[P1]** rebased stale finding",
-                                                "url": "https://example.invalid/reanchored-stale",
+                                                "body": "**[P1]** reanchored current-head finding",
+                                                "url": "https://example.invalid/reanchored-current",
                                                 "commit": {"oid": head_sha},
                                                 "originalCommit": {"oid": old_sha},
                                             }
@@ -516,6 +516,7 @@ def test_unresolved_codex_threads_filter_to_current_head(monkeypatch: pytest.Mon
     )
 
     assert urls == (
+        "https://example.invalid/reanchored-current",
         "https://example.invalid/current",
         "https://example.invalid/fallback",
     )

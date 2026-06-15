@@ -446,8 +446,10 @@ def pull_review_comment_nodes(repo: str, number: int, *, head_sha: str) -> list[
         commit_id = comment.get("commit_id")
         original_commit_id = comment.get("original_commit_id")
         review_id = comment.get("pull_request_review_id")
+        commit_matches_head = commit_id == head_sha
         original_matches_head = original_commit_id == head_sha
-        if not original_matches_head and not body_mentions_head(body, head_sha):
+        body_mentions_current_head = body_mentions_head(body, head_sha)
+        if not commit_matches_head and not original_matches_head and not body_mentions_current_head:
             continue
         effective_commit_id = original_commit_id if original_matches_head else commit_id
         effective_review_id = review_id if original_matches_head else None
@@ -827,10 +829,14 @@ def unresolved_codex_finding_thread_urls(
                 if not is_needs_work_codex_body(comment.get("body")):
                     continue
                 body = comment.get("body")
+                commit = comment.get("commit")
+                commit_oid = commit.get("oid") if isinstance(commit, dict) else None
                 original_commit = comment.get("originalCommit")
                 original_oid = original_commit.get("oid") if isinstance(original_commit, dict) else None
                 body_mentions_current_head = body_mentions_head(body, head_sha)
                 if body_mentions_current_head:
+                    pass
+                elif commit_oid == head_sha:
                     pass
                 elif original_oid == head_sha:
                     pass

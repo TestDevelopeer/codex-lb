@@ -6,16 +6,26 @@ The Codex label synchronization script MUST grant `🤖 codex: ok` only when the
 current pull-request head has green required checks, a clean Codex review for
 that head, and no unresolved current-head Codex finding threads. It MUST treat
 stale unresolved Codex inline threads as non-blocking when neither their
-original commit nor their body text ties them to the current head.
+current commit, original commit, nor body text ties them to the current head.
 
 #### Scenario: stale rebased inline thread remains unresolved
 
 - **GIVEN** a pull request was rebased after a Codex inline finding
 - **AND** the unresolved GraphQL review thread still reports `isOutdated=false`
+- **AND** the thread's current commit is not the current head
 - **AND** the thread's original commit is not the current head
 - **AND** the thread body does not mention the current head
 - **WHEN** the label synchronizer evaluates the pull request
 - **THEN** that thread does not force `🤖 codex: needs work`
+
+#### Scenario: reanchored unresolved inline thread belongs to the current head
+
+- **GIVEN** an unresolved Codex inline finding thread
+- **AND** the thread's current commit is the pull request head
+- **AND** the thread's original commit is older than the pull request head
+- **WHEN** the label synchronizer evaluates the pull request
+- **THEN** that thread blocks `🤖 codex: ok`
+- **AND** the synchronizer records a needs-work reason that links to the thread
 
 #### Scenario: unresolved inline thread belongs to the current head
 
