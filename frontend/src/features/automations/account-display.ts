@@ -1,5 +1,5 @@
 import type { AccountSummary } from "@/features/accounts/schemas";
-import { buildDuplicateAccountIdSet, formatCompactAccountId } from "@/utils/account-identifiers";
+import { formatCompactAccountId } from "@/utils/account-identifiers";
 
 const MULTI_ACCOUNT_NAMES_INLINE_LIMIT = 3;
 
@@ -35,7 +35,6 @@ function buildUnknownAccountDisplay(accountId: string): AccountDisplay {
 }
 
 export function buildAccountDisplayIndex(accounts: AccountSummary[]): Map<string, AccountDisplayEntry> {
-  const duplicateAccountIds = buildDuplicateAccountIdSet(accounts);
   const index = new Map<string, AccountDisplayEntry>();
 
   for (const account of accounts) {
@@ -46,7 +45,7 @@ export function buildAccountDisplayIndex(accounts: AccountSummary[]): Map<string
     const hasDistinctEmail = displayName.length > 0 && email.length > 0 && displayName.toLowerCase() !== email.toLowerCase();
     const secondary = hasDistinctEmail
       ? email
-      : (duplicateAccountIds.has(account.accountId) ? `ID ${formatCompactAccountId(account.accountId, 6, 4)}` : null);
+      : (account.isEmailDuplicate === true ? `ID ${formatCompactAccountId(account.accountId, 6, 4)}` : null);
 
     index.set(account.accountId, {
       accountId: account.accountId,
