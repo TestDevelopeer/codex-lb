@@ -21109,6 +21109,66 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_retry_http_bridge_request_on_fresh_upstream_uses_archive_request_id(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    send_request_ids: list[str | None] = []
+
+    async def capture_send_text(_text: str) -> None:
+        send_request_ids.append(get_request_id())
+
+    send_text = AsyncMock(side_effect=capture_send_text)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_retry_fresh",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.1","input":"retry"}',
+        archive_request_id="archive_bridge_retry_fresh",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_retry_fresh"),
+        upstream=cast(
+            proxy_service.UpstreamResponsesWebSocket,
+            SimpleNamespace(send_text=send_text, close=AsyncMock()),
+        ),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        last_upstream_close_code=1011,
+    )
+    reconnect = AsyncMock(return_value=None)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    token = set_request_id("ambient_old_session_request")
+    try:
+        retried = await service._retry_http_bridge_request_on_fresh_upstream(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "",
+        )
+        assert get_request_id() == "ambient_old_session_request"
+    finally:
+        reset_request_id(token)
+
+    assert retried is True
+    reconnect.assert_awaited_once_with(session, request_state=request_state, restart_reader=True)
+    send_text.assert_awaited_once_with('{"type":"response.create","model":"gpt-5.1","input":"retry"}')
+    assert send_request_ids == ["archive_bridge_retry_fresh"]
+
+
+@pytest.mark.asyncio
 async def test_retry_http_bridge_precreated_request_suppresses_retry_for_rejected_close():
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -21194,7 +21254,12 @@ async def test_retry_http_bridge_precreated_request_suppresses_retry_after_respo
 async def test_retry_http_bridge_precreated_request_replays_created_without_visible_output(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
-    send_text = AsyncMock()
+    send_request_ids: list[str | None] = []
+
+    async def capture_send_text(_text: str) -> None:
+        send_request_ids.append(get_request_id())
+
+    send_text = AsyncMock(side_effect=capture_send_text)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_created_no_output",
         model="gpt-5.1",
@@ -21203,6 +21268,7 @@ async def test_retry_http_bridge_precreated_request_replays_created_without_visi
         api_key_reservation=None,
         started_at=0.0,
         request_text='{"type":"response.create","model":"gpt-5.1","input":"retry"}',
+        archive_request_id="archive_bridge_created_no_output",
         response_id="resp_bridge_created_then_closed",
         awaiting_response_created=False,
         response_event_count=1,
@@ -21227,11 +21293,17 @@ async def test_retry_http_bridge_precreated_request_replays_created_without_visi
     reconnect = AsyncMock(return_value=None)
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
 
-    retried = await service._retry_http_bridge_precreated_request(session)
+    token = set_request_id("ambient_old_session_request")
+    try:
+        retried = await service._retry_http_bridge_precreated_request(session)
+        assert get_request_id() == "ambient_old_session_request"
+    finally:
+        reset_request_id(token)
 
     assert retried is True
     reconnect.assert_awaited_once_with(session, request_state=request_state)
     send_text.assert_awaited_once_with('{"type":"response.create","model":"gpt-5.1","input":"retry"}')
+    assert send_request_ids == ["archive_bridge_created_no_output"]
     assert request_state.replay_count == 1
     assert request_state.awaiting_response_created is True
     assert request_state.response_id is None

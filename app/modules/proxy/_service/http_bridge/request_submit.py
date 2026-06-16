@@ -180,6 +180,18 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
+async def _send_http_bridge_request_text_with_archive_id(
+    session: "_HTTPBridgeSession",
+    request_state: _WebSocketRequestState,
+    text_data: str,
+) -> None:
+    token = set_request_id(request_state.archive_request_id)
+    try:
+        await session.upstream.send_text(text_data)
+    finally:
+        reset_request_id(token)
+
+
 class _HTTPBridgeRequestSubmitMixin:
     def _prepare_http_bridge_request(
         self: Any,
@@ -557,11 +569,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 async with session.pending_lock:
                     session.pending_requests.append(request_state)
                 request_enqueued = True
-                token = set_request_id(request_state.archive_request_id)
-                try:
-                    await session.upstream.send_text(text_data)
-                finally:
-                    reset_request_id(token)
+                await _send_http_bridge_request_text_with_archive_id(session, request_state, text_data)
                 session.last_used_at = _service_time().monotonic()
         except ProxyResponseError:
             await self._cleanup_http_bridge_submit_interruption(
@@ -960,7 +968,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.previous_response_id = None
                     request_state.proxy_injected_previous_response_id = False
                     request_state.request_text = retry_text_data
-                await session.upstream.send_text(retry_text_data)
+                await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text_data)
             _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = _service_time().monotonic()
             return True
@@ -1016,7 +1024,7 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
-            await session.upstream.send_text(request_text)
+            await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text)
             session.last_used_at = _service_time().monotonic()
             return True
         except Exception as exc:
@@ -1082,7 +1090,7 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
-            await session.upstream.send_text(request_text)
+            await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text)
             session.last_used_at = _service_time().monotonic()
             return "retried"
         except Exception as exc:
@@ -1149,7 +1157,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state=request_state,
                 require_security_work_authorized=True,
             )
-            await session.upstream.send_text(retry_text)
+            await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text)
             session.last_used_at = _service_time().monotonic()
             return True
         except Exception as exc:
