@@ -39,18 +39,18 @@ def apply_usage_quota(
                     reset_at = None
             else:
                 used_percent = 100.0
-                if infer_status_from_usage or status == AccountStatus.QUOTA_EXCEEDED:
+                if infer_status_from_usage:
                     if secondary_reset is not None:
                         reset_at = secondary_reset
                     status = AccountStatus.QUOTA_EXCEEDED
                     return status, used_percent, reset_at
-        elif status == AccountStatus.QUOTA_EXCEEDED:
+        if status == AccountStatus.QUOTA_EXCEEDED:
             if runtime_reset and runtime_reset > time.time():
                 reset_at = runtime_reset
             else:
                 status = AccountStatus.ACTIVE
                 reset_at = None
-    elif status == AccountStatus.QUOTA_EXCEEDED and secondary_reset is not None:
+    elif status == AccountStatus.QUOTA_EXCEEDED and secondary_reset is not None and infer_status_from_usage:
         reset_at = secondary_reset
 
     if has_credit_override and status == AccountStatus.QUOTA_EXCEEDED:
@@ -62,7 +62,7 @@ def apply_usage_quota(
     if primary_used is not None:
         if primary_used >= 100.0:
             used_percent = 100.0
-            if infer_status_from_usage or status == AccountStatus.RATE_LIMITED:
+            if infer_status_from_usage:
                 if primary_reset is not None:
                     reset_at = primary_reset
                 else:

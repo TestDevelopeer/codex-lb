@@ -1499,6 +1499,34 @@ def test_state_from_account_clears_stale_advisory_account_reset_for_active_accou
     assert now + 0.18 <= state.cooldown_until <= now + 0.22
 
 
+def test_state_from_account_uses_runtime_cooldown_not_advisory_reset_after_resetless_rate_limit(
+    monkeypatch,
+):
+    now = 1_700_000_000.0
+    future_reset = int(now + 300)
+    cooldown_until = now + 0.2
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=None),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=100.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+        ),
+        secondary_entry=None,
+        runtime=RuntimeState(cooldown_until=cooldown_until, blocked_at=now - 1),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent == 100.0
+    assert state.reset_at is None
+    assert state.primary_reset_at == future_reset
+    assert state.cooldown_until == cooldown_until
+
+
 def test_state_from_account_keeps_active_account_selectable_when_secondary_usage_snapshot_is_exhausted(
     monkeypatch,
 ):
