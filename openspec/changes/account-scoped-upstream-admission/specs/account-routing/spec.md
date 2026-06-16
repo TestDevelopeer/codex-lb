@@ -20,6 +20,14 @@ Foreground proxy account selection MUST NOT reject an otherwise active account s
 - **THEN** the account remains eligible for upstream routing
 - **AND** the local secondary usage snapshot is not promoted into a persisted upstream quota-exceeded state before an upstream response proves quota exhaustion
 
+#### Scenario: Advisory usage reset is not persisted as an account block
+
+- **GIVEN** an upstream account is persisted as active
+- **AND** its latest local usage snapshot reports 100 percent usage with a future reset
+- **WHEN** foreground account selection evaluates and persists selection state for the active account
+- **THEN** the account-level blocking reset remains unset
+- **AND** a later upstream rate-limit response without reset metadata is governed by upstream retry/backoff cooldown rather than the advisory usage reset
+
 ### Requirement: Upstream rate and quota penalties are account-scoped by default
 
 When upstream returns rate-limit or quota-exhaustion evidence for a selected account, the proxy MUST apply that penalty to the selected upstream account identity. The proxy MUST NOT invent model-scoped, transport-scoped, or request-kind-scoped upstream cooldown semantics unless upstream documentation or captured upstream response metadata proves that narrower upstream scope.

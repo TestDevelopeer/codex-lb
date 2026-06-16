@@ -1461,7 +1461,8 @@ def test_state_from_account_keeps_active_account_selectable_when_primary_usage_s
 
     assert state.status == AccountStatus.ACTIVE
     assert state.used_percent == 100.0
-    assert state.reset_at == future_reset
+    assert state.reset_at is None
+    assert state.primary_reset_at == future_reset
     selection = select_account([state], routing_strategy="single_account")
     assert selection.account is not None
     assert selection.account.account_id == state.account_id
@@ -1488,6 +1489,7 @@ def test_state_from_account_keeps_active_account_selectable_when_secondary_usage
     )
 
     assert state.status == AccountStatus.ACTIVE
+    assert state.reset_at is None
     assert state.secondary_used_percent == 100.0
     assert state.secondary_reset_at == future_reset
     selection = select_account([state], routing_strategy="single_account")
@@ -1558,6 +1560,7 @@ def test_state_from_account_treats_monthly_usage_as_advisory_long_window_pressur
     )
 
     assert state.status == AccountStatus.ACTIVE
+    assert state.reset_at is None
     assert state.secondary_used_percent == 100.0
     assert state.secondary_reset_at == future_reset
     assert state.capacity_credits == usage_core.capacity_for_plan("free", "monthly")

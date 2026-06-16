@@ -39,9 +39,9 @@ def apply_usage_quota(
                     reset_at = None
             else:
                 used_percent = 100.0
-                if secondary_reset is not None:
-                    reset_at = secondary_reset
                 if infer_status_from_usage or status == AccountStatus.QUOTA_EXCEEDED:
+                    if secondary_reset is not None:
+                        reset_at = secondary_reset
                     status = AccountStatus.QUOTA_EXCEEDED
                     return status, used_percent, reset_at
         elif status == AccountStatus.QUOTA_EXCEEDED:
@@ -62,11 +62,11 @@ def apply_usage_quota(
     if primary_used is not None:
         if primary_used >= 100.0:
             used_percent = 100.0
-            if primary_reset is not None:
-                reset_at = primary_reset
-            else:
-                reset_at = _fallback_primary_reset(primary_window_minutes) or reset_at
             if infer_status_from_usage or status == AccountStatus.RATE_LIMITED:
+                if primary_reset is not None:
+                    reset_at = primary_reset
+                else:
+                    reset_at = _fallback_primary_reset(primary_window_minutes) or reset_at
                 status = AccountStatus.RATE_LIMITED
                 return status, used_percent, reset_at
         if status == AccountStatus.RATE_LIMITED:

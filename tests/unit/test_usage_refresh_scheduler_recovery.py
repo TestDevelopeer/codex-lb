@@ -563,7 +563,7 @@ async def test_reconcile_recoverable_account_statuses_restores_quota_exceeded_fr
 
 
 @pytest.mark.asyncio
-async def test_reconcile_recoverable_account_statuses_recovers_quota_exceeded_when_only_primary_snapshot_is_exhausted(
+async def test_reconcile_recoverable_account_statuses_recovers_quota_exceeded_and_clears_advisory_primary_reset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = 1_700_000_000.0
@@ -612,7 +612,7 @@ async def test_reconcile_recoverable_account_statuses_recovers_quota_exceeded_wh
 
     assert recovered == 1
     assert account.status == AccountStatus.ACTIVE
-    assert account.reset_at == primary_reset
+    assert account.reset_at is None
     assert account.blocked_at is None
     assert len(accounts_repo.status_updates) == 1
 
