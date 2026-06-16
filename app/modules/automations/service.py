@@ -819,6 +819,23 @@ class AutomationsService:
     ) -> int:
         cycle_key = cycle.cycle_key
         existing_cycle_runs = await self._repository.list_runs_for_cycle_key(cycle_key=cycle_key)
+        if not cycle.accounts:
+            if existing_cycle_runs:
+                return 0
+            claim = await self._repository.claim_run(
+                job_id=job.id,
+                trigger=AUTOMATION_RUN_TRIGGER_SCHEDULED,
+                slot_key=_scheduled_slot_key(job.id, due_slot=due_slot),
+                cycle_key=cycle_key,
+                cycle_expected_accounts=cycle.cycle_expected_accounts,
+                cycle_window_end=cycle.cycle_window_end,
+                scheduled_for=due_slot,
+                started_at=now_utc,
+            )
+            if claim is None:
+                return 0
+            await self._execute_claimed_run(job, claim)
+            return 1
         cycle_account_id_by_slot_key = {
             _scheduled_slot_key(
                 job.id,
@@ -1007,10 +1024,7 @@ class AutomationsService:
         last_error_message: str | None = "No available accounts configured for automation job"
         last_attempted_account_id: str | None = forced_account_id
         cached_accounts_by_id: dict[str, Account] | None = None
-        if forced_account_id is not None:
-            account_ids_to_try = [forced_account_id]
-        else:
-            account_ids_to_try = list(job.account_ids)
+        account_ids_to_try = list(job.account_ids)
         if not account_ids_to_try:
             accounts = await self._accounts_repository.list_accounts()
             account_ids_to_try = [
@@ -1022,6 +1036,7 @@ class AutomationsService:
                 )
             ]
             cached_accounts_by_id = {account.id: account for account in accounts}
+        account_ids_to_try = _prioritize_forced_account(account_ids_to_try, forced_account_id)
 
         for account_id in account_ids_to_try:
             request_started_at: float | None = None

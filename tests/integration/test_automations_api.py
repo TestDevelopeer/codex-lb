@@ -533,7 +533,7 @@ async def test_automations_runs_options_respect_status_filter(async_client):
 
 
 @pytest.mark.asyncio
-async def test_automations_run_now_keeps_per_account_slots_pinned_on_retryable_failure(async_client, monkeypatch):
+async def test_automations_run_now_fails_over_for_retryable_forced_account_failure(async_client, monkeypatch):
     accounts = await _create_accounts("auto-fallback-a", "auto-fallback-b")
     call_order: list[str | None] = []
 
@@ -581,11 +581,8 @@ async def test_automations_run_now_keeps_per_account_slots_pinned_on_retryable_f
     assert runs_response.status_code == 200
     runs_payload = runs_response.json()["items"]
     assert len(runs_payload) == 2
-    statuses_by_account = {entry["accountId"]: entry["status"] for entry in runs_payload}
-    assert statuses_by_account == {
-        accounts[0].id: "failed",
-        accounts[1].id: "success",
-    }
+    assert sorted(entry["status"] for entry in runs_payload) == ["partial", "success"]
+    assert {entry["accountId"] for entry in runs_payload} == {accounts[1].id}
 
     grouped_response = await async_client.get(
         "/api/automations/runs",
@@ -659,8 +656,12 @@ async def test_automations_run_now_keeps_per_account_slots_pinned_on_retryable_f
     )
     assert options_with_status_response.status_code == 200
     options_with_status_payload = options_with_status_response.json()
-    assert options_with_status_payload["accountIds"] == [accounts[0].id, accounts[1].id]
-    assert call_order == [f"chatgpt-{accounts[0].id}", f"chatgpt-{accounts[1].id}"]
+    assert options_with_status_payload["accountIds"] == [accounts[1].id]
+    assert call_order == [
+        f"chatgpt-{accounts[0].id}",
+        f"chatgpt-{accounts[1].id}",
+        f"chatgpt-{accounts[1].id}",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1511,19 +1512,24 @@ async def test_automations_due_run_freezes_empty_cycle_after_late_account_reacti
         await _set_job_updated_at(job.id, now)
 
         executed_first = await service.run_due_jobs(now_utc=now + timedelta(seconds=5))
-        assert executed_first == 0
+        assert executed_first == 1
 
         cycle_key = f"scheduled:{job.id}:{now.isoformat()}"
         cycle = await automations_repository.get_run_cycle(cycle_key=cycle_key)
         assert cycle is not None
         assert cycle.cycle_expected_accounts == 0
         assert cycle.accounts == []
+        first_runs = await automations_repository.list_runs(job.id, limit=10)
+        assert len(first_runs) == 1
+        assert first_runs[0].status == "failed"
+        assert first_runs[0].error_code == "no_available_accounts"
 
         await accounts_repository.update_status(account.id, AccountStatus.ACTIVE)
         executed_second = await service.run_due_jobs(now_utc=now + timedelta(minutes=4))
 
         assert executed_second == 0
-        assert await automations_repository.list_runs(job.id, limit=10) == []
+        second_runs = await automations_repository.list_runs(job.id, limit=10)
+        assert [run.id for run in second_runs] == [first_runs[0].id]
 
 
 @pytest.mark.asyncio
@@ -2801,7 +2807,7 @@ async def test_automations_scheduler_skips_ineligible_snapshot_accounts_without_
 
 
 @pytest.mark.asyncio
-async def test_automations_scheduler_keeps_forced_cycle_slot_pinned_on_retryable_failure(
+async def test_automations_scheduler_fails_over_for_retryable_forced_cycle_slot_failure(
     async_client,
     monkeypatch,
 ):
@@ -2854,13 +2860,11 @@ async def test_automations_scheduler_keeps_forced_cycle_slot_pinned_on_retryable
     assert called_chatgpt_account_ids == [
         accounts[0].chatgpt_account_id,
         accounts[1].chatgpt_account_id,
+        accounts[1].chatgpt_account_id,
     ]
-    statuses_by_account = {run.account_id: run.status for run in cycle_runs}
-    assert statuses_by_account == {
-        accounts[0].id: "failed",
-        accounts[1].id: "success",
-    }
-    assert {run.attempt_count for run in cycle_runs} == {1}
+    assert sorted(run.status for run in cycle_runs) == ["partial", "success"]
+    assert {run.account_id for run in cycle_runs} == {accounts[1].id}
+    assert sorted(run.attempt_count for run in cycle_runs) == [1, 2]
     assert details.total_accounts == 2
     assert details.completed_accounts == 2
     assert details.pending_accounts == 0
@@ -4143,6 +4147,62 @@ async def test_automations_manual_cycle_without_eligible_accounts_keeps_zero_tot
     assert details_payload["completedAccounts"] == 0
     assert details_payload["pendingAccounts"] == 0
     assert details_payload["accounts"] == []
+
+
+@pytest.mark.asyncio
+async def test_automations_scheduled_cycle_records_failed_run_without_available_accounts(async_client, monkeypatch):
+    accounts = await _create_accounts("auto-scheduled-empty-a")
+    now = utcnow().replace(second=0, microsecond=0)
+
+    async def _fake_compact(*_args, **_kwargs):
+        raise AssertionError("scheduled zero-account cycle must not call upstream")
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    create_response = await async_client.post(
+        "/api/automations",
+        json={
+            "name": "Scheduled cycle without eligible accounts",
+            "enabled": True,
+            "schedule": {
+                "type": "daily",
+                "time": now.strftime("%H:%M"),
+                "timezone": "UTC",
+                "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            },
+            "model": "gpt-5.3-codex",
+            "prompt": "ping",
+            "accountIds": [accounts[0].id],
+        },
+    )
+    assert create_response.status_code == 200
+    automation_id = create_response.json()["id"]
+    await _set_job_updated_at(automation_id, now - timedelta(hours=1))
+
+    future_reset_at = naive_utc_to_epoch(now + timedelta(hours=1))
+    await _set_account_status_with_reset(
+        accounts[0].id,
+        AccountStatus.RATE_LIMITED,
+        reset_at=future_reset_at,
+    )
+
+    executed = await _run_due_jobs(now_utc=now)
+    assert executed == 1
+
+    runs_response = await async_client.get(
+        "/api/automations/runs",
+        params={"automationId": automation_id, "trigger": "scheduled", "limit": 25, "offset": 0},
+    )
+    assert runs_response.status_code == 200
+    runs_payload = runs_response.json()
+    assert runs_payload["total"] == 1
+    run_item = runs_payload["items"][0]
+    assert run_item["status"] == "failed"
+    assert run_item["totalAccounts"] == 0
+    assert run_item["completedAccounts"] == 0
+    assert run_item["pendingAccounts"] == 0
+    assert run_item["errorCode"] == "no_available_accounts"
+    assert run_item["errorMessage"] == "No available accounts configured for automation job"
 
 
 @pytest.mark.asyncio
