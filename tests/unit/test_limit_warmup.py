@@ -857,12 +857,17 @@ async def test_auto_model_unavailable_records_skipped_attempt(monkeypatch) -> No
 def test_staggered_idle_slot_is_stable_and_spread() -> None:
     now = datetime.fromtimestamp(0, tz=timezone.utc).replace(tzinfo=None)
 
-    first = limit_warmup_service._staggered_idle_due("acc_1", ["acc_1", "acc_2", "acc_3"], now=now)
-    same = limit_warmup_service._staggered_idle_due("acc_1", ["acc_3", "acc_1", "acc_2"], now=now)
+    first = limit_warmup_service._staggered_idle_due(
+        "acc_1", ["acc_1", "acc_2", "acc_3"], now=now, reset_at=18_000
+    )
+    same = limit_warmup_service._staggered_idle_due(
+        "acc_1", ["acc_3", "acc_1", "acc_2"], now=now, reset_at=18_000
+    )
     other = limit_warmup_service._staggered_idle_due(
         "acc_2",
         ["acc_1", "acc_2", "acc_3"],
         now=datetime.fromtimestamp(6000, tz=timezone.utc).replace(tzinfo=None),
+        reset_at=18_000,
     )
 
     assert first is not None
@@ -870,6 +875,29 @@ def test_staggered_idle_slot_is_stable_and_spread() -> None:
     assert first.slot_offset_seconds == 0
     assert other is not None
     assert other.slot_offset_seconds == 6000
+
+
+def test_staggered_idle_slot_uses_account_reset_window() -> None:
+    reset_at = 20_000
+    window_start = reset_at - 18_000
+
+    before_slot = limit_warmup_service._staggered_idle_due(
+        "acc_2",
+        ["acc_1", "acc_2", "acc_3"],
+        now=datetime.fromtimestamp(window_start + 5_900, tz=timezone.utc).replace(tzinfo=None),
+        reset_at=reset_at,
+    )
+    at_slot = limit_warmup_service._staggered_idle_due(
+        "acc_2",
+        ["acc_1", "acc_2", "acc_3"],
+        now=datetime.fromtimestamp(window_start + 6_000, tz=timezone.utc).replace(tzinfo=None),
+        reset_at=reset_at,
+    )
+
+    assert before_slot is None
+    assert at_slot is not None
+    assert at_slot.cycle_end == reset_at
+    assert at_slot.slot_offset_seconds == 6_000
 
 
 @pytest.mark.asyncio
@@ -882,9 +910,9 @@ async def test_staggered_idle_warmup_disabled_by_default_does_not_prestart_idle_
     await service.run_after_usage_refresh(
         accounts=[account],
         settings=_settings(limit_warmup_staggered_idle_enabled=False),
-        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
         before_secondary={},
-        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
         after_secondary={},
     )
 
@@ -907,9 +935,9 @@ async def test_staggered_idle_warmup_blocks_outside_account_slot(monkeypatch) ->
     await service.run_after_usage_refresh(
         accounts=[_account("acc_1"), account, _account("acc_3")],
         settings=_settings(limit_warmup_staggered_idle_enabled=True),
-        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
         before_secondary={},
-        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
         after_secondary={},
     )
 
@@ -934,16 +962,16 @@ async def test_staggered_idle_warmup_prestarts_once_per_cycle(monkeypatch) -> No
         await service.run_after_usage_refresh(
             accounts=accounts,
             settings=_settings(limit_warmup_staggered_idle_enabled=True),
-            before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+            before_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
             before_secondary={},
-            after_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+            after_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
             after_secondary={},
         )
 
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
     assert len(repo.rows) == 1
     assert repo.rows[0].window == "primary_idle"
-    assert repo.rows[0].reset_at == 1000
+    assert repo.rows[0].reset_at == 18_000
     assert repo.rows[0].status == "succeeded"
 
 
@@ -963,7 +991,7 @@ async def test_staggered_idle_warmup_skips_when_reset_at_is_missing(monkeypatch)
     await service.run_after_usage_refresh(
         accounts=accounts,
         settings=_settings(limit_warmup_staggered_idle_enabled=True),
-        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
         before_secondary={},
         after_primary={
             account.id: UsageHistory(
@@ -1001,9 +1029,9 @@ async def test_staggered_idle_warmup_ignores_selected_reset_windows(monkeypatch)
             limit_warmup_windows="secondary",
             limit_warmup_staggered_idle_enabled=True,
         ),
-        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
         before_secondary={},
-        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
         after_secondary={},
     )
 
@@ -1031,9 +1059,9 @@ async def test_staggered_idle_warmup_requires_fully_unused_primary_window(monkey
             limit_warmup_min_available_percent=80.0,
             limit_warmup_staggered_idle_enabled=True,
         ),
-        before_primary={account.id: _usage(account.id, used_percent=10, reset_at=1000)},
+        before_primary={account.id: _usage(account.id, used_percent=10, reset_at=18_000)},
         before_secondary={},
-        after_primary={account.id: _usage(account.id, used_percent=10, reset_at=1000)},
+        after_primary={account.id: _usage(account.id, used_percent=10, reset_at=18_000)},
         after_secondary={},
     )
 
@@ -1054,9 +1082,9 @@ async def test_staggered_idle_warmup_catches_slot_between_refresh_ticks(monkeypa
     await service.run_after_usage_refresh(
         accounts=accounts,
         settings=_settings(limit_warmup_staggered_idle_enabled=True),
-        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
         before_secondary={},
-        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000, recorded_at=now)},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000, recorded_at=now)},
         after_secondary={},
         refresh_started_at=now - timedelta(seconds=5),
         usage_refresh_interval_seconds=120,
@@ -1080,9 +1108,9 @@ async def test_staggered_idle_warmup_catches_slot_during_long_refresh(monkeypatc
     await service.run_after_usage_refresh(
         accounts=accounts,
         settings=_settings(limit_warmup_staggered_idle_enabled=True),
-        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
         before_secondary={},
-        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000, recorded_at=now)},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000, recorded_at=now)},
         after_secondary={},
         refresh_started_at=datetime.fromtimestamp(5995, tz=timezone.utc).replace(tzinfo=None),
         usage_refresh_interval_seconds=60,
@@ -1106,13 +1134,13 @@ async def test_staggered_idle_warmup_requires_current_refresh_sample(monkeypatch
     await service.run_after_usage_refresh(
         accounts=accounts,
         settings=_settings(limit_warmup_staggered_idle_enabled=True),
-        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
         before_secondary={},
         after_primary={
             account.id: _usage(
                 account.id,
                 used_percent=0,
-                reset_at=1000,
+                reset_at=18_000,
                 recorded_at=now - timedelta(minutes=5),
             )
         },
@@ -1127,7 +1155,7 @@ async def test_staggered_idle_warmup_requires_current_refresh_sample(monkeypatch
 @pytest.mark.asyncio
 async def test_staggered_idle_warmup_rejects_stale_entry_from_prior_cycle(monkeypatch) -> None:
     now = datetime.fromtimestamp(18100, tz=timezone.utc).replace(tzinfo=None)
-    refresh_started_at = datetime.fromtimestamp(17980, tz=timezone.utc).replace(tzinfo=None)
+    stale_recorded_at = datetime.fromtimestamp(11990, tz=timezone.utc).replace(tzinfo=None)
     monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: now)
     repo = FakeWarmupRepo()
     sender = FakeSender()
@@ -1138,18 +1166,18 @@ async def test_staggered_idle_warmup_rejects_stale_entry_from_prior_cycle(monkey
     await service.run_after_usage_refresh(
         accounts=accounts,
         settings=_settings(limit_warmup_staggered_idle_enabled=True),
-        before_primary={account.id: _usage(account.id, used_percent=100, reset_at=20000)},
+        before_primary={account.id: _usage(account.id, used_percent=100, reset_at=30_000)},
         before_secondary={},
         after_primary={
             account.id: _usage(
                 account.id,
                 used_percent=0,
-                reset_at=17000,
-                recorded_at=refresh_started_at + timedelta(seconds=10),
+                reset_at=30_000,
+                recorded_at=stale_recorded_at,
             )
         },
         after_secondary={},
-        refresh_started_at=refresh_started_at,
+        refresh_started_at=None,
         usage_refresh_interval_seconds=120,
     )
 
