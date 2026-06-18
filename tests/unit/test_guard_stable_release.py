@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -8,9 +9,11 @@ from tests.unit.test_guard_beta_release import event_file, git, init_repo_with_b
 
 
 def run_stable_guard(project_root: Path, repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    env = {key: value for key, value in os.environ.items() if key not in {"GITHUB_EVENT_PATH", "GITHUB_HEAD_REF"}}
     return subprocess.run(
         [sys.executable, "-m", "scripts.guard_stable_release", "--root", str(repo_root), *args],
         cwd=project_root,
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
