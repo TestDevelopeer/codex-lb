@@ -115,13 +115,19 @@ def guard_stable_pull_request(root: Path, event_path: str, base_ref: str, head_r
         return
 
     expected_changed = sorted(current_versions)
-    if head_ref != RELEASE_PLEASE_BRANCH:
-        raise GuardError(
-            "Stable release promotions must come from the release-please branch.\n"
-            f"Expected head branch: {RELEASE_PLEASE_BRANCH}\n"
-            f"Actual head branch: {head_ref or '<unknown>'}\n"
-            f"Changed release fields: {', '.join(changed)}"
-        )
+    if head_ref:
+        if head_ref != RELEASE_PLEASE_BRANCH:
+            raise GuardError(
+                "Stable release promotions must come from the release-please branch.\n"
+                f"Expected head branch: {RELEASE_PLEASE_BRANCH}\n"
+                f"Actual head branch: {head_ref}\n"
+                f"Changed release fields: {', '.join(changed)}"
+            )
+    elif pr is not None:
+        raise GuardError("Could not determine the stable release PR head branch.")
+    else:
+        print("No PR head branch available; relying on the pull_request stable release guard for branch ownership.")
+
     if pr is not None:
         require_canonical_head_repository(event, pr)
 

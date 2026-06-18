@@ -105,6 +105,30 @@ def test_stable_guard_rejects_stable_promotion_from_non_release_please_branch(tm
     assert "Actual head branch: fix/manual-stable-promotion" in result.stderr
 
 
+def test_stable_guard_accepts_merge_queue_without_head_ref_after_pr_gate(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo_with_beta_commit(repo, version="1.20.0-beta.3")
+    base = git(repo, "rev-parse", "HEAD")
+
+    update_project_versions(repo, "1.20.0")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "chore(main): release 1.20.0")
+
+    result = run_stable_guard(
+        Path(__file__).resolve().parents[2],
+        repo,
+        "--base-ref",
+        base,
+        "--head-ref",
+        "",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "No PR head branch available" in result.stdout
+    assert "Stable release guard passed for 1.20.0" in result.stdout
+
+
 def test_stable_guard_allows_non_promotion_metadata_repair_branch(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
