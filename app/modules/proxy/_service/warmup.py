@@ -19,6 +19,7 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
+from app.core.providers import is_freemodel
 from app.db.models import Account, AccountStatus
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.support import _request_log_useragent_fields
@@ -47,6 +48,13 @@ class _WarmupServiceProtocol(Protocol):
     async def _write_request_log(self, **kwargs: Any) -> None: ...
 
     async def _release_websocket_reservation(self, reservation: ApiKeyUsageReservationData | None) -> None: ...
+
+    def _call_with_supported_optional_kwargs(
+        self,
+        func: Callable[..., Awaitable[CompactResponsePayload]],
+        *args: object,
+        optional_kwargs: Mapping[str, object],
+    ) -> Awaitable[CompactResponsePayload]: ...
 
 
 def _service_core_compact_responses() -> _CompactResponses:
@@ -105,6 +113,7 @@ class _WarmupAccountSnapshot:
     chatgpt_account_id: str | None
     email: str
     plan_type: str
+    provider: str
     access_token_encrypted: bytes
     refresh_token_encrypted: bytes
     id_token_encrypted: bytes
@@ -129,6 +138,7 @@ def _snapshot_warmup_account(account: Account) -> _WarmupAccountSnapshot:
         chatgpt_account_id=account.chatgpt_account_id,
         email=account.email,
         plan_type=account.plan_type,
+        provider=getattr(account, "provider", None) or "openai",
         access_token_encrypted=account.access_token_encrypted,
         refresh_token_encrypted=account.refresh_token_encrypted,
         id_token_encrypted=account.id_token_encrypted,
@@ -146,6 +156,7 @@ def _materialize_warmup_account(account: _WarmupAccountSnapshot) -> Account:
         chatgpt_account_id=account.chatgpt_account_id,
         email=account.email,
         plan_type=account.plan_type,
+        provider=account.provider,
         access_token_encrypted=account.access_token_encrypted,
         refresh_token_encrypted=account.refresh_token_encrypted,
         id_token_encrypted=account.id_token_encrypted,
@@ -311,7 +322,8 @@ class _WarmupMixin:
             refresh_timeout = max(1.0, float(get_settings().upstream_connect_timeout_seconds))
             live_account = await proxy._ensure_fresh_with_budget(live_account, timeout_seconds=refresh_timeout)
             access_token = proxy._encryptor.decrypt(live_account.access_token_encrypted)
-            account_header_id = _header_account_id(live_account.chatgpt_account_id)
+            account_provider = getattr(live_account, "provider", None)
+            account_header_id = None if is_freemodel(account_provider) else _header_account_id(live_account.chatgpt_account_id)
             payload = ResponsesCompactRequest(
                 model=warmup_model,
                 instructions="Warmup request.",
@@ -319,11 +331,13 @@ class _WarmupMixin:
                 store=False,
             )
             normalize_upstream_model_alias(payload)
-            response = await _service_core_compact_responses()(
+            response = await proxy._call_with_supported_optional_kwargs(
+                _service_core_compact_responses(),
                 payload,
                 upstream_headers,
                 access_token,
                 account_header_id,
+                optional_kwargs={"provider": account_provider},
             )
             await proxy._load_balancer.record_success(live_account)
             status = "success"

@@ -36,6 +36,7 @@
 - [ ] Resolve provider endpoint config from the selected account in `proxy/service.py` and pass `base_url`/paths to upstream client calls.
 - [ ] Normalize text-only FreeModel limit errors into persisted `usage_limit_reached` / `resets_at` account blocks.
 - [ ] Expose runtime `status_reset_at` in account summaries when no usage-window reset is available.
+- [ ] Ensure FreeModel warmup and websocket HTTP fallback preserve provider-aware compact routing and do not replay OpenAI-only `previous_response_id` continuations.
 
 ## 7. Validation
 - [ ] `openspec validate --specs` passes.

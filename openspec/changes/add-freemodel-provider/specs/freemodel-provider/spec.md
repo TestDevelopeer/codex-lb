@@ -83,3 +83,13 @@ When an account is blocked by a persisted runtime `reset_at` but has no current 
 - **WHEN** the dashboard requests `GET /api/accounts`
 - **THEN** the account summary MUST include `status_reset_at`
 - **AND** the primary, secondary, and monthly reset fields MAY remain null.
+
+### Requirement: FreeModel websocket fallback must avoid OpenAI-only previous-response continuations
+When a websocket turn is relayed through FreeModel's HTTP Responses API fallback, the proxy MUST forward the prepared fresh-turn payload whenever the request state already has a retry-safe `fresh_upstream_request_text`. It MUST NOT reintroduce an OpenAI-only `previous_response_id` continuation into that FreeModel HTTP request solely because the original downstream websocket payload carried one.
+
+#### Scenario: FreeModel HTTP relay drops websocket-v2-only previous_response_id
+- **GIVEN** a downstream websocket turn was prepared with a retry-safe `fresh_upstream_request_text`
+- **AND** the original websocket payload carried `previous_response_id`
+- **WHEN** codex-lb relays that turn to FreeModel through the HTTP fallback path
+- **THEN** the upstream FreeModel request MUST be built from the prepared fresh-turn payload
+- **AND** the forwarded request MUST omit `previous_response_id`.
