@@ -514,7 +514,13 @@ class _StreamingMixin(_StreamingRetryMixin):
         proxy = cast(_StreamingServiceProtocol, self)
         account_id_value = account.id
         access_token = proxy._encryptor.decrypt(account.access_token_encrypted)
-        account_id = _header_account_id(account.chatgpt_account_id)
+        account_provider = getattr(account, "provider", None)
+        # FreeModel не использует chatgpt-account-id и обращается к /v1/responses;
+        # оставляем account_id=None, чтобы заголовок не генерировался.
+        if account_provider == "freemodel":
+            account_id = None
+        else:
+            account_id = _header_account_id(account.chatgpt_account_id)
         model = payload.model
         requested_service_tier = payload.service_tier
         service_tier = requested_service_tier
@@ -572,6 +578,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         "route": route,
                         "allow_direct_egress": route is None,
                         "route_trace": route_trace,
+                        "provider": account_provider,
                     },
                     raise_for_status=True,
                     upstream_stream_transport_override=upstream_stream_transport,
@@ -587,6 +594,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         "route": route,
                         "allow_direct_egress": route is None,
                         "route_trace": route_trace,
+                        "provider": account_provider,
                     },
                     raise_for_status=True,
                 )

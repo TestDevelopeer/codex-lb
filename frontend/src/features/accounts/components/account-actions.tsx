@@ -56,8 +56,10 @@ export function AccountActions({
   onLimitWarmupChange,
   onRoutingPolicyChange,
 }: AccountActionsProps) {
+  const isFreemodel = account.provider === "freemodel";
   const showOperatorRecoveryAction =
-    account.status === "reauth_required" || account.status === "deactivated";
+    !isFreemodel
+    && (account.status === "reauth_required" || account.status === "deactivated");
   const probeDisabled =
     busy || readOnly || account.status === "paused" || showOperatorRecoveryAction;
 
@@ -95,6 +97,7 @@ export function AccountActions({
         </div>
       ) : null}
 
+      {isFreemodel ? null : (
       <label
         htmlFor={`security-work-authorized-${account.accountId}`}
         className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
@@ -112,6 +115,7 @@ export function AccountActions({
           }
         />
       </label>
+      )}
 
       <div className="flex flex-wrap gap-2">
         {account.status === "paused" ? (
@@ -165,31 +169,35 @@ export function AccountActions({
           Force probe
         </Button>
 
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="h-8 gap-1.5 text-xs"
-          onClick={() =>
-            onLimitWarmupChange(account.accountId, !account.limitWarmupEnabled)
-          }
-          disabled={busy || readOnly}
-        >
-          <Zap className="h-3.5 w-3.5" />
-          {account.limitWarmupEnabled ? "Disable warm-up" : "Enable warm-up"}
-        </Button>
+        {isFreemodel ? null : (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 gap-1.5 text-xs"
+            onClick={() =>
+              onLimitWarmupChange(account.accountId, !account.limitWarmupEnabled)
+            }
+            disabled={busy || readOnly}
+          >
+            <Zap className="h-3.5 w-3.5" />
+            {account.limitWarmupEnabled ? "Disable warm-up" : "Enable warm-up"}
+          </Button>
+        )}
 
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="h-8 gap-1.5 text-xs"
-          onClick={() => onExportAuth(account.accountId)}
-          disabled={busy || readOnly}
-        >
-          <Download className="h-3.5 w-3.5" />
-          Export
-        </Button>
+        {isFreemodel ? null : (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 gap-1.5 text-xs"
+            onClick={() => onExportAuth(account.accountId)}
+            disabled={busy || readOnly}
+          >
+            <Download className="h-3.5 w-3.5" />
+            Export
+          </Button>
+        )}
 
         <Button
           type="button"

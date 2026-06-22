@@ -10,6 +10,7 @@ import { AccountDetail } from "@/features/accounts/components/account-detail";
 import { AccountList } from "@/features/accounts/components/account-list";
 import { AccountsSkeleton } from "@/features/accounts/components/accounts-skeleton";
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
+import { FreemodelImportDialog } from "@/features/accounts/components/freemodel-import-dialog";
 import { AuthExportDialog } from "@/features/accounts/components/auth-export-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import {
@@ -36,6 +37,7 @@ export function AccountsPage() {
   const {
     accountsQuery,
     importMutation,
+    importFreemodelMutation,
     pauseMutation,
     resumeMutation,
     setAliasMutation,
@@ -51,6 +53,7 @@ export function AccountsPage() {
   const canWrite = useAuthStore((state) => state.canWrite);
 
   const importDialog = useDialogState();
+  const freemodelDialog = useDialogState();
   const oauthDialog = useDialogState();
   const deleteDialog = useDialogState<string>();
   const exportDialog = useDialogState<AccountAuthExportResponse>();
@@ -101,6 +104,7 @@ export function AccountsPage() {
 
   const mutationBusy =
     importMutation.isPending ||
+    importFreemodelMutation.isPending ||
     pauseMutation.isPending ||
     resumeMutation.isPending ||
     setAliasMutation.isPending ||
@@ -114,6 +118,7 @@ export function AccountsPage() {
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
+    getErrorMessageOrNull(importFreemodelMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
     getErrorMessageOrNull(setAliasMutation.error) ||
@@ -153,6 +158,7 @@ export function AccountsPage() {
               onSortModeChange={setAccountSortMode}
               onOpenImport={() => importDialog.show()}
               onOpenOauth={() => oauthDialog.show()}
+              onOpenFreemodel={() => freemodelDialog.show()}
               readOnly={!canWrite}
             />
           </div>
@@ -208,6 +214,16 @@ export function AccountsPage() {
         onOpenChange={importDialog.onOpenChange}
         onImport={async (file) => {
           await importMutation.mutateAsync(file);
+        }}
+      />
+
+      <FreemodelImportDialog
+        open={freemodelDialog.open}
+        busy={importFreemodelMutation.isPending}
+        error={getErrorMessageOrNull(importFreemodelMutation.error)}
+        onOpenChange={freemodelDialog.onOpenChange}
+        onImport={async (apiKey, label) => {
+          await importFreemodelMutation.mutateAsync({ apiKey, label });
         }}
       />
 

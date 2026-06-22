@@ -17,7 +17,7 @@ import type {
 import { useAccountTrends } from "@/features/accounts/hooks/use-accounts";
 import type { AccountProxyBindingRequest, UpstreamProxyAdmin } from "@/features/settings/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
-import { formatSlug } from "@/utils/formatters";
+import { formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
 
 export type AccountDetailProps = {
   account: AccountSummary | null;
@@ -89,6 +89,10 @@ export function AccountDetail({
   const idSuffix = showAccountId ? ` (${compactId})` : "";
   const workspaceLabel = account.chatgptAccountId || account.workspaceLabel || account.workspaceId || "Personal / unknown workspace";
   const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
+  const blockedResetLabel =
+    (account.status === "rate_limited" || account.status === "quota_exceeded") && account.statusResetAt
+      ? formatQuotaResetLabel(account.statusResetAt)
+      : null;
 
   return (
     <div
@@ -123,8 +127,15 @@ export function AccountDetail({
           </p>
         ) : null}
         <p className="mt-0.5 text-xs text-muted-foreground">
-          {workspaceLabel} | {formatSlug(account.planType)}{seatLabel}
+          {account.provider === "freemodel"
+            ? `FreeModel API key | ${formatSlug(account.planType)}`
+            : `${workspaceLabel} | ${formatSlug(account.planType)}${seatLabel}`}
         </p>
+        {blockedResetLabel ? (
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Available {blockedResetLabel}
+          </p>
+        ) : null}
       </div>
 
       {onProxyBindingSave ? (

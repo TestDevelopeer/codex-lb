@@ -21,6 +21,7 @@ function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "acco
     email: overrides.email,
     displayName: overrides.displayName ?? overrides.email,
     planType: overrides.planType ?? "plus",
+    provider: overrides.provider ?? "openai",
     status: overrides.status ?? "active",
     limitWarmupEnabled: overrides.limitWarmupEnabled ?? false,
     limitWarmup: overrides.limitWarmup ?? null,

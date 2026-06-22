@@ -253,6 +253,8 @@ class UsageUpdater:
         for account in accounts:
             if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
                 continue
+            if getattr(account, "provider", "openai") == "freemodel":
+                continue
             if _is_usage_refresh_in_cooldown(account.id):
                 continue
             latest = await self._freshness_usage_entry(account, latest_usage.get(account.id))

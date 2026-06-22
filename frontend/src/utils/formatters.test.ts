@@ -151,6 +151,11 @@ describe("formatters", () => {
     expect(formatAccessTokenLabel(null)).toBe("Missing");
     expect(
       formatAccessTokenLabel({
+        access: { state: "api_key" },
+      }),
+    ).toBe("Stored");
+    expect(
+      formatAccessTokenLabel({
         access: { expiresAt: "invalid-date" },
       }),
     ).toBe("Unknown");

@@ -2177,10 +2177,18 @@ def _usage_refresh_interval_seconds() -> int:
 
 
 def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Account]:
+    freemodel_accounts = [account for account in accounts if getattr(account, "provider", "openai") == "freemodel"]
+    openai_accounts = [account for account in accounts if getattr(account, "provider", "openai") != "freemodel"]
     allowed_plans = get_model_registry().plan_types_for_model(model)
     if allowed_plans is None:
         return accounts
-    return [a for a in accounts if account_plan_matches_allowed(a.plan_type, allowed_plans)]
+    filtered_openai = [a for a in openai_accounts if account_plan_matches_allowed(a.plan_type, allowed_plans)]
+    # FreeModel-аккаунты тоже должны проходить проверку plan/model — иначе Codex Desktop
+    # шлёт фоновые запросы (например gpt-5.4-mini) на провайдер, где модели нет.
+    filtered_freemodel = [
+        a for a in freemodel_accounts if account_plan_matches_allowed(a.plan_type or "freemodel", allowed_plans)
+    ]
+    return filtered_openai + filtered_freemodel
 
 
 def _selectable_accounts(accounts: list[Account]) -> list[Account]:

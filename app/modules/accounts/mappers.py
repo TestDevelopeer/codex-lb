@@ -7,6 +7,7 @@ from app.core.auth import DEFAULT_EMAIL, DEFAULT_PLAN, extract_id_token_claims, 
 from app.core.config import settings as config_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
+from app.core.providers import is_freemodel
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
 from app.core.utils.time import from_epoch_seconds
@@ -101,7 +102,14 @@ def _account_to_summary(
     is_email_duplicate: bool = False,
 ) -> AccountSummary:
     plan_type = coerce_account_plan_type(account.plan_type, DEFAULT_PLAN)
-    auth_status = _build_auth_status(account, encryptor) if include_auth else None
+    if is_freemodel(getattr(account, "provider", None)):
+        auth_status = AccountAuthStatus(
+            access=AccountTokenStatus(state="api_key"),
+            refresh=AccountTokenStatus(state="not_applicable"),
+            id_token=AccountTokenStatus(state="not_applicable"),
+        ) if include_auth else None
+    else:
+        auth_status = _build_auth_status(account, encryptor) if include_auth else None
     effective_primary_usage, effective_secondary_usage = _effective_usage_windows(
         primary_usage,
         secondary_usage,
@@ -178,6 +186,12 @@ def _account_to_summary(
         from_epoch_seconds(effective_secondary_usage.reset_at) if effective_secondary_usage is not None else None
     )
     reset_at_monthly = from_epoch_seconds(monthly_usage.reset_at) if monthly_usage is not None else None
+    status_reset_at = (
+        from_epoch_seconds(account.reset_at)
+        if account.reset_at is not None
+        and account.status in {AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED}
+        else None
+    )
     window_minutes_primary = effective_primary_usage.window_minutes if effective_primary_usage is not None else None
     window_minutes_secondary = (
         effective_secondary_usage.window_minutes if effective_secondary_usage is not None else None
@@ -230,6 +244,7 @@ def _account_to_summary(
         workspace_label=account.workspace_label,
         seat_type=account.seat_type,
         plan_type=plan_type,
+        provider=getattr(account, "provider", None) or "openai",
         status=effective_status.value,
         routing_policy=_normalize_account_routing_policy(account.routing_policy),
         security_work_authorized=bool(account.security_work_authorized),
@@ -238,6 +253,7 @@ def _account_to_summary(
             secondary_remaining_percent=secondary_remaining_percent,
             monthly_remaining_percent=monthly_remaining_percent,
         ),
+        status_reset_at=status_reset_at,
         reset_at_primary=reset_at_primary,
         reset_at_secondary=reset_at_secondary,
         reset_at_monthly=reset_at_monthly,

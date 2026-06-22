@@ -80,10 +80,12 @@ class AccountSummary(DashboardModel):
     workspace_label: str | None = None
     seat_type: str | None = None
     plan_type: str
+    provider: str = "openai"
     routing_policy: str = Field(default="normal", pattern=r"^(normal|burn_first|preserve)$")
     status: str
     security_work_authorized: bool = False
     usage: AccountUsage | None = None
+    status_reset_at: datetime | None = None
     reset_at_primary: datetime | None = None
     reset_at_secondary: datetime | None = None
     reset_at_monthly: datetime | None = None
@@ -128,7 +130,13 @@ class AccountImportResponse(DashboardModel):
     workspace_label: str | None = None
     seat_type: str | None = None
     plan_type: str
+    provider: str = "openai"
     status: str
+
+
+class FreemodelImportRequest(DashboardModel):
+    api_key: str = Field(min_length=1)
+    label: str | None = None
 
 
 class OpenCodeOAuthAuth(DashboardModel):

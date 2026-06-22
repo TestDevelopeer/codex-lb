@@ -114,6 +114,27 @@ describe("AccountListItem", () => {
     expect(screen.queryByText("Reset Reset unavailable")).not.toBeInTheDocument();
   });
 
+  it("shows availability hint for runtime status reset without quota window reset", () => {
+    const account = createAccountSummary({
+      status: "rate_limited",
+      statusResetAt: "2026-01-01T14:00:00.000Z",
+      resetAtPrimary: null,
+      resetAtSecondary: null,
+      resetAtMonthly: null,
+      windowMinutesPrimary: null,
+      windowMinutesSecondary: null,
+      usage: {
+        primaryRemainingPercent: null,
+        secondaryRemainingPercent: null,
+        monthlyRemainingPercent: null,
+      },
+    });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("Available in 2h")).toBeInTheDocument();
+  });
+
   it("shows only the 5h row when the account quota preference is 5h", () => {
     useAccountQuotaDisplayStore.setState({ quotaDisplay: "5h" });
 

@@ -334,6 +334,9 @@ class _HTTPBridgeStreamingMixin:
         image_request = _responses_request_contains_input_image(payload)
         image_generation_request = _responses_request_uses_image_generation(payload)
         force_upstream_stream_transport = "http" if image_request else None
+        if await self._freemodel_http_direct_enabled():
+            runtime_config = dataclasses.replace(runtime_config, enabled=False)
+            force_upstream_stream_transport = "http"
         if runtime_config.enabled and (image_request or image_generation_request):
             logger.info(
                 "stream_responses bypassing http bridge for image-capable request input_image=%s "

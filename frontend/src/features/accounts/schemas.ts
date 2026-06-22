@@ -66,10 +66,12 @@ export const AccountSummarySchema = z.object({
   workspaceLabel: z.string().nullable().optional(),
   seatType: z.string().nullable().optional(),
   planType: z.string(),
+  provider: z.enum(["openai", "freemodel"]).default("openai"),
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]).optional(),
   status: z.string(),
   securityWorkAuthorized: z.boolean().optional(),
   usage: AccountUsageSchema.nullable().optional(),
+  statusResetAt: z.iso.datetime({ offset: true }).nullable().optional(),
   resetAtPrimary: z.iso.datetime({ offset: true }).nullable().optional(),
   resetAtSecondary: z.iso.datetime({ offset: true }).nullable().optional(),
   resetAtMonthly: z.iso.datetime({ offset: true }).nullable().optional(),
@@ -111,7 +113,13 @@ export const AccountImportResponseSchema = z.object({
   workspaceLabel: z.string().nullable().optional(),
   seatType: z.string().nullable().optional(),
   planType: z.string(),
+  provider: z.enum(["openai", "freemodel"]).default("openai"),
   status: z.string(),
+});
+
+export const FreemodelImportRequestSchema = z.object({
+  apiKey: z.string().min(1),
+  label: z.string().nullable().optional(),
 });
 
 const OpenCodeOAuthAuthSchema = z.object({

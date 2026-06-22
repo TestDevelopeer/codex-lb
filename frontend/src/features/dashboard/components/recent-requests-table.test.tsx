@@ -89,6 +89,7 @@ describe("RecentRequestsTable", () => {
              email: "primary@example.com",
              displayName: "Primary Account",
              planType: "plus",
+             provider: "openai",
              status: "active",
              limitWarmupEnabled: false,
              additionalQuotas: [],

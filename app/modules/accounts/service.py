@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import timedelta
@@ -23,6 +24,7 @@ from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
+from app.core.providers import AccountProvider
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.auth_manager import AuthManager
@@ -38,6 +40,7 @@ from app.modules.accounts.schemas import (
     AccountOpenCodeAuthExportAccount,
     AccountOpenCodeAuthExportResponse,
     AccountProbeResponse,
+    FreemodelImportRequest,
     AccountRequestUsage,
     AccountSummary,
     AccountTrendsResponse,
@@ -293,6 +296,7 @@ class AccountsService:
             workspace_label=claims.workspace_label,
             seat_type=claims.seat_type,
             plan_type=plan_type,
+            provider=AccountProvider.OPENAI.value,
             access_token_encrypted=self._encryptor.encrypt(auth.tokens.access_token),
             refresh_token_encrypted=self._encryptor.encrypt(auth.tokens.refresh_token),
             id_token_encrypted=self._encryptor.encrypt(auth.tokens.id_token),
@@ -314,6 +318,41 @@ class AccountsService:
             seat_type=saved.seat_type,
             plan_type=saved.plan_type,
             status=saved.status,
+        )
+
+    async def import_freemodel_key(self, payload: FreemodelImportRequest) -> AccountImportResponse:
+        api_key = payload.api_key.strip()
+        if not api_key:
+            raise InvalidAuthJsonError("API key must not be empty")
+
+        key_digest = hashlib.sha256(api_key.encode()).hexdigest()[:16]
+        account_id = f"fm_{key_digest}"
+        label = payload.label.strip() if payload.label else None
+        email = label if label else f"freemodel-{key_digest[:8]}@local.codex-lb"
+
+        account = Account(
+            id=account_id,
+            chatgpt_account_id=None,
+            email=email,
+            alias=label,
+            plan_type="freemodel",
+            provider=AccountProvider.FREEMODEL.value,
+            access_token_encrypted=self._encryptor.encrypt(api_key),
+            refresh_token_encrypted=None,
+            id_token_encrypted=None,
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+            deactivation_reason=None,
+        )
+
+        saved = await self._repo.upsert(account, merge_by_email=False)
+        get_account_selection_cache().invalidate()
+        return AccountImportResponse(
+            account_id=saved.id,
+            email=saved.email,
+            plan_type=saved.plan_type,
+            status=saved.status,
+            provider=saved.provider,
         )
 
     async def reactivate_account(self, account_id: str) -> bool:
@@ -455,13 +494,19 @@ class AccountsService:
 
         access_token = self._encryptor.decrypt(probe_account.access_token_encrypted)
         probe_model = model or DEFAULT_PROBE_MODEL
+        account_provider = getattr(probe_account, "provider", None)
         probe_status = await self._send_probe_request(
             access_token=access_token,
             chatgpt_account_id=probe_account.chatgpt_account_id,
             model=probe_model,
+            provider=account_provider,
         )
 
-        if self._usage_repo and self._usage_updater:
+        if (
+            self._usage_repo
+            and self._usage_updater
+            and account_provider != AccountProvider.FREEMODEL.value
+        ):
             await self._usage_updater.force_refresh(probe_account)
             get_account_selection_cache().invalidate()
 
@@ -496,18 +541,23 @@ class AccountsService:
         access_token: str,
         chatgpt_account_id: str | None,
         model: str,
+        provider: str | None = None,
     ) -> int:
-        settings = get_settings()
-        base = settings.upstream_base_url.rstrip("/")
-        if "/backend-api" not in base:
-            base = f"{base}/backend-api"
-        url = f"{base}/codex/responses"
+        from app.core.providers import get_endpoint_for_provider
+
+        endpoint = get_endpoint_for_provider(provider)
+        base = endpoint.base_url.rstrip("/")
+        url = f"{base}{endpoint.responses_path}"
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Accept": "text/event-stream",
             "Content-Type": "application/json",
         }
-        if chatgpt_account_id and not chatgpt_account_id.startswith(("email_", "local_")):
+        if (
+            endpoint.needs_account_id_header
+            and chatgpt_account_id
+            and not chatgpt_account_id.startswith(("email_", "local_"))
+        ):
             headers["chatgpt-account-id"] = chatgpt_account_id
         body = {
             "model": model,

@@ -15,6 +15,7 @@ import {
   AccountTrendsResponseSchema,
   AccountProbeRequestSchema,
   AccountProbeResponseSchema,
+  FreemodelImportRequestSchema,
   ManualOauthCallbackRequestSchema,
   ManualOauthCallbackResponseSchema,
   OauthCompleteRequestSchema,
@@ -38,6 +39,16 @@ export function importAccount(file: File) {
   formData.append("auth_json", file);
   return post(`${ACCOUNTS_BASE_PATH}/import`, AccountImportResponseSchema, {
     body: formData,
+  });
+}
+
+export function importFreemodelKey(apiKey: string, label?: string) {
+  const payload = FreemodelImportRequestSchema.parse({
+    apiKey,
+    label: label ?? null,
+  });
+  return post(`${ACCOUNTS_BASE_PATH}/import-freemodel`, AccountImportResponseSchema, {
+    body: payload,
   });
 }
 

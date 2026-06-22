@@ -1288,6 +1288,32 @@ async def test_accounts_list_keeps_rate_limited_without_reset_signal(async_clien
 
 
 @pytest.mark.asyncio
+async def test_accounts_list_exposes_status_reset_at_without_usage_windows(async_client, db_setup):
+    future_reset = int(datetime(2026, 6, 24, 11, 50, tzinfo=timezone.utc).timestamp())
+    account = _make_account("acc_freemodel_status_reset", "freemodel-status-reset@example.com", plan_type="freemodel")
+    account.status = AccountStatus.RATE_LIMITED
+    account.reset_at = future_reset
+    account.blocked_at = int(utcnow().timestamp())
+    account.provider = "freemodel"
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(account)
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    payload = response.json()
+    accounts = {item["accountId"]: item for item in payload["accounts"]}
+
+    account_payload = accounts["acc_freemodel_status_reset"]
+    assert account_payload["status"] == "rate_limited"
+    assert account_payload["statusResetAt"] == _iso_utc(future_reset)
+    assert account_payload["resetAtPrimary"] is None
+    assert account_payload["resetAtSecondary"] is None
+    assert account_payload["resetAtMonthly"] is None
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_keeps_quota_exceeded_reset_when_ignoring_monthly_primary(async_client, db_setup):
     future_reset = int((utcnow() + timedelta(days=14)).timestamp())
     account = _make_account("acc_free_quota_exceeded_monthly", "free-quota-monthly@example.com", plan_type="free")

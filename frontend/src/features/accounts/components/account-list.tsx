@@ -31,6 +31,7 @@ export type AccountListProps = {
   onSelect: (accountId: string) => void;
   onOpenImport: () => void;
   onOpenOauth: () => void;
+  onOpenFreemodel: () => void;
   sortMode?: AccountSortMode;
   onSortModeChange?: (sortMode: AccountSortMode) => void;
   readOnly?: boolean;
@@ -42,6 +43,7 @@ export function AccountList({
   onSelect,
   onOpenImport,
   onOpenOauth,
+  onOpenFreemodel,
   sortMode,
   onSortModeChange,
   readOnly = false,
@@ -67,7 +69,8 @@ export function AccountList({
         (account.alias?.toLowerCase().includes(needle) ?? false) ||
         account.displayName.toLowerCase().includes(needle) ||
         account.accountId.toLowerCase().includes(needle) ||
-        account.planType.toLowerCase().includes(needle)
+        account.planType.toLowerCase().includes(needle) ||
+        account.provider.toLowerCase().includes(needle)
       );
     });
   }, [accounts, quotaDisplay, search, statusFilter, activeSortMode]);
@@ -170,6 +173,7 @@ export function AccountList({
         onOpenChange={setChooserOpen}
         onImport={onOpenImport}
         onAddAccount={onOpenOauth}
+        onAddFreemodel={onOpenFreemodel}
       />
     </div>
   );
