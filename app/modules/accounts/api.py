@@ -32,6 +32,7 @@ from app.modules.accounts.schemas import (
     AccountTrendsResponse,
     AccountUpdateRequest,
     AccountUpdateResponse,
+    FreemodelImportRequest,
 )
 from app.modules.accounts.service import AccountNotProbableError, AccountStateTransitionError, InvalidAuthJsonError
 
@@ -147,6 +148,25 @@ async def import_account(
         raise DashboardBadRequestError("Invalid auth.json payload", code="invalid_auth_json") from exc
     except AccountIdentityConflictError as exc:
         raise DashboardConflictError(str(exc), code="duplicate_identity_conflict") from exc
+
+
+@router.post("/import-freemodel", response_model=AccountImportResponse)
+async def import_freemodel_key(
+    request: Request,
+    payload: FreemodelImportRequest,
+    _write_access=Depends(require_dashboard_write_access),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountImportResponse:
+    try:
+        response = await context.service.import_freemodel_key(payload)
+        AuditService.log_async(
+            "account_created",
+            actor_ip=request.client.host if request.client else None,
+            details={"account_id": response.account_id, "provider": "freemodel"},
+        )
+        return response
+    except InvalidAuthJsonError as exc:
+        raise DashboardBadRequestError(str(exc), code="invalid_freemodel_key") from exc
 
 
 @router.post("/{account_id}/reactivate", response_model=AccountReactivateResponse)

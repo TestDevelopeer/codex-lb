@@ -16,6 +16,7 @@ from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_perman
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
+from app.core.providers import is_freemodel
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
@@ -168,6 +169,11 @@ class AuthManager:
         self._refresh_repo_factory = refresh_repo_factory
 
     async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
+        # FreeModel-аккаунты используют статичные API-ключи без OAuth-refresh:
+        # у них нет refresh_token и нет id_token, поэтому пропускаем обновление
+        # и извлечение chatgpt-account-id.
+        if is_freemodel(getattr(account, "provider", None)):
+            return account
         if force or should_refresh(account.last_refresh):
             account = await _REFRESH_SINGLEFLIGHT.run(
                 _refresh_singleflight_key(self._encryptor, account),
@@ -199,6 +205,10 @@ class AuthManager:
             return await owned.refresh_account(account)
 
     async def refresh_account(self, account: Account) -> Account:
+        if is_freemodel(getattr(account, "provider", None)):
+            return account
+        if not account.refresh_token_encrypted:
+            return account
         refresh_token = self._encryptor.decrypt(account.refresh_token_encrypted)
         try:
             result = await self._refresh_tokens(refresh_token, account=account)
@@ -372,7 +382,12 @@ def _refresh_token_material_changed(
     )
 
 
-def _refresh_token_material_fingerprint(encryptor: TokenEncryptor, refresh_token_encrypted: bytes) -> str:
+def _refresh_token_material_fingerprint(
+    encryptor: TokenEncryptor,
+    refresh_token_encrypted: bytes | None,
+) -> str:
+    if not refresh_token_encrypted:
+        return "missing"
     try:
         material = encryptor.decrypt(refresh_token_encrypted).encode("utf-8")
     except Exception:

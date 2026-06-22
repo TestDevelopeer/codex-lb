@@ -482,7 +482,11 @@ class _CompactMixin:
             ) -> CompactResponsePayload:
                 nonlocal route_fallback_used, route_mode, route_pool_id, route_endpoint_id
                 access_token = proxy._encryptor.decrypt(target.access_token_encrypted)
-                account_id = _header_account_id(target.chatgpt_account_id)
+                account_provider = getattr(target, "provider", None)
+                if account_provider == "freemodel":
+                    account_id = None
+                else:
+                    account_id = _header_account_id(target.chatgpt_account_id)
                 remaining_budget = _remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
                     logger.warning(
@@ -526,6 +530,7 @@ class _CompactMixin:
                                 "route": route,
                                 "allow_direct_egress": route is None,
                                 "route_trace": route_trace,
+                                "provider": account_provider,
                             },
                         )
                     finally:

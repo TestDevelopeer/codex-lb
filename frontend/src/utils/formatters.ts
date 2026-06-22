@@ -67,6 +67,7 @@ type TokenState = {
 
 type AccessTokenState = {
   expiresAt?: string | null;
+  state?: string | null;
 };
 
 export type AccountAuthStatus = {
@@ -312,6 +313,10 @@ export function truncateText(value: unknown, maxLen = 80): string {
 }
 
 export function formatAccessTokenLabel(auth: AccountAuthStatus | null | undefined): string {
+  const accessState = auth?.access?.state;
+  if (accessState === "api_key") {
+    return "Stored";
+  }
   const expiresAt = auth?.access?.expiresAt;
   if (!expiresAt) {
     return "Missing";
@@ -333,6 +338,7 @@ export function formatRefreshTokenLabel(auth: AccountAuthStatus | null | undefin
     stored: "Stored",
     missing: "Missing",
     expired: "Expired",
+    not_applicable: "N/A",
   };
   return state && labelMap[state] ? labelMap[state] : "Unknown";
 }
@@ -342,6 +348,7 @@ export function formatIdTokenLabel(auth: AccountAuthStatus | null | undefined): 
   const labelMap: Record<string, string> = {
     parsed: "Parsed",
     unknown: "Unknown",
+    not_applicable: "N/A",
   };
   return state && labelMap[state] ? labelMap[state] : "Unknown";
 }

@@ -790,6 +790,8 @@ def _apply_account_updates(target: Account, source: Account) -> None:
         target.workspace_label = source.workspace_label
         target.seat_type = source.seat_type
     target.plan_type = source.plan_type
+    if source.provider:
+        target.provider = source.provider
     target.access_token_encrypted = source.access_token_encrypted
     target.refresh_token_encrypted = source.refresh_token_encrypted
     target.id_token_encrypted = source.id_token_encrypted

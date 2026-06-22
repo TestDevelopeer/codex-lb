@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from app.core import usage as usage_core
 from app.core.balancer.types import ClassifiedFailure, FailureClass, FailurePhase, UpstreamError
 from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope
+from app.core.openai.error_normalization import normalize_openai_error
 from app.core.openai.models import OpenAIError
 from app.core.plan_types import normalize_rate_limit_plan_type
 from app.core.types import JsonValue
@@ -266,11 +267,12 @@ def _parse_openai_error(payload: OpenAIErrorEnvelope) -> OpenAIError | None:
     if not error:
         return None
     try:
-        return OpenAIError.model_validate(error)
+        parsed = OpenAIError.model_validate(error)
+        return normalize_openai_error(parsed)
     except ValidationError:
         if not isinstance(error, dict):
             return None
-        return OpenAIError(
+        parsed = OpenAIError(
             message=_coerce_str(error.get("message")),
             type=_coerce_str(error.get("type")),
             code=_coerce_str(error.get("code")),
@@ -279,6 +281,7 @@ def _parse_openai_error(payload: OpenAIErrorEnvelope) -> OpenAIError | None:
             resets_at=_coerce_number(error.get("resets_at")),
             resets_in_seconds=_coerce_number(error.get("resets_in_seconds")),
         )
+        return normalize_openai_error(parsed)
 
 
 def _coerce_str(value: JsonValue) -> str | None:

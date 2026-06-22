@@ -71,6 +71,13 @@ class Account(Base):
     workspace_label: Mapped[str | None] = mapped_column(String, nullable=True)
     seat_type: Mapped[str | None] = mapped_column(String, nullable=True)
     plan_type: Mapped[str] = mapped_column(String, nullable=False)
+    # ``openai`` — ChatGPT OAuth-аккаунт; ``freemodel`` — статичный API-ключ FreeModel.
+    provider: Mapped[str] = mapped_column(
+        String,
+        default="openai",
+        server_default=text("'openai'"),
+        nullable=False,
+    )
     routing_policy: Mapped[str] = mapped_column(
         String,
         default="normal",
@@ -79,8 +86,8 @@ class Account(Base):
     )
 
     access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    refresh_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    id_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    refresh_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    id_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
     last_refresh: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

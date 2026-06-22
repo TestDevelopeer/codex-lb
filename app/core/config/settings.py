@@ -154,6 +154,9 @@ class Settings(BaseSettings):
     database_sqlite_startup_check_mode: Literal["quick", "full", "off"] = "quick"
     database_alembic_auto_remap_enabled: bool = True
     upstream_base_url: str = "https://chatgpt.com/backend-api"
+    # Базовый URL OpenAI-совместимого провайдера FreeModel для аккаунтов с
+    # ``provider = freemodel``. Запросы к таким аккаунтам идут на ``/v1/*``.
+    freemodel_base_url: str = "https://api.freemodel.dev"
     upstream_stream_transport: Literal["http", "websocket", "auto"] = "auto"
     upstream_connect_timeout_seconds: float = 8.0
     upstream_compact_timeout_seconds: float | None = None

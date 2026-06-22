@@ -6,6 +6,7 @@ import sys
 import time
 from collections import deque
 from typing import Any, Mapping, NoReturn, cast
+from uuid import uuid4
 
 import aiohttp
 import anyio
@@ -897,6 +898,35 @@ class _WebSocketMixin:
                                     pending_requests.remove(request_state)
                         await _release_websocket_response_create_gate(request_state, response_create_gate)
                         raise
+
+                if (
+                    upstream is None
+                    and payload is not None
+                    and request_state is not None
+                    and _is_websocket_response_create(payload)
+                    and await proxy._freemodel_http_direct_enabled()
+                ):
+                    await proxy._stream_websocket_turn_via_freemodel_http(
+                        websocket,
+                        payload,
+                        request_state,
+                        headers=filtered_headers,
+                        pending_requests=pending_requests,
+                        pending_lock=pending_lock,
+                        client_send_lock=client_send_lock,
+                        api_key=api_key,
+                        response_create_gate=response_create_gate,
+                        downstream_activity=downstream_activity,
+                        codex_session_affinity=codex_session_affinity,
+                        openai_cache_affinity=openai_cache_affinity,
+                    )
+                    proxy._cancel_request_state_api_key_reservation_heartbeat(request_state)
+                    if request_state_registered:
+                        async with pending_lock:
+                            if request_state in pending_requests:
+                                pending_requests.remove(request_state)
+                        await _release_websocket_response_create_gate(request_state, response_create_gate)
+                    continue
 
                 if upstream is None:
                     if text_data is not None and payload is None:
@@ -2042,7 +2072,11 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         access_token = proxy._encryptor.decrypt(account.access_token_encrypted)
-        account_id = _header_account_id(account.chatgpt_account_id)
+        account_provider = getattr(account, "provider", None)
+        if account_provider == "freemodel":
+            account_id = None
+        else:
+            account_id = _header_account_id(account.chatgpt_account_id)
         connect_lease = await proxy._get_work_admission().acquire_websocket_connect()
         try:
             try:
@@ -2066,6 +2100,7 @@ class _WebSocketMixin:
                 optional_kwargs={
                     "route": route,
                     "allow_direct_egress": route is None,
+                    "provider": account_provider,
                 },
             )
             if request_state is not None:
@@ -2073,6 +2108,164 @@ class _WebSocketMixin:
             return upstream
         finally:
             connect_lease.release()
+
+    async def _freemodel_http_direct_enabled(self) -> bool:
+        """True, если все активные аккаунты — FreeModel (прямой HTTP без upstream WS)."""
+        proxy = cast(_WebSocketServiceProtocol, self)
+        inactive_statuses = (
+            AccountStatus.REAUTH_REQUIRED,
+            AccountStatus.DEACTIVATED,
+            AccountStatus.PAUSED,
+        )
+        async with proxy._repo_factory() as repos:
+            accounts = await repos.accounts.list_accounts()
+            active = [account for account in accounts if account.status not in inactive_statuses]
+            if not active:
+                return False
+            return all(getattr(account, "provider", "openai") == "freemodel" for account in active)
+
+    async def _emit_websocket_freemodel_prewarm_completion(
+        self,
+        websocket: WebSocket,
+        *,
+        payload: Mapping[str, JsonValue],
+        client_send_lock: anyio.Lock,
+        downstream_activity: _DownstreamWebSocketActivity,
+    ) -> None:
+        """Синтетический prewarm для FreeModel (generate=false), без upstream HTTP."""
+        proxy = cast(_WebSocketServiceProtocol, self)
+        response_id = f"resp_prewarm_{uuid4().hex}"
+        model = payload.get("model")
+        response_body: dict[str, JsonValue] = {
+            "id": response_id,
+            "object": "response",
+            "status": "completed",
+            "output": [],
+        }
+        if isinstance(model, str):
+            response_body["model"] = model
+        for event_type in ("response.created", "response.completed"):
+            event = {"type": event_type, "response": dict(response_body)}
+            text = json.dumps(event, ensure_ascii=True, separators=(",", ":"))
+            await proxy._send_downstream_websocket_text(
+                websocket,
+                client_send_lock=client_send_lock,
+                text=text,
+                downstream_activity=downstream_activity,
+            )
+
+    async def _stream_websocket_turn_via_freemodel_http(
+        self,
+        websocket: WebSocket,
+        payload: dict[str, JsonValue],
+        request_state: _WebSocketRequestState,
+        *,
+        headers: Mapping[str, str],
+        pending_requests: deque[_WebSocketRequestState],
+        pending_lock: anyio.Lock,
+        client_send_lock: anyio.Lock,
+        api_key: ApiKeyData | None,
+        response_create_gate: asyncio.Semaphore,
+        downstream_activity: _DownstreamWebSocketActivity,
+        codex_session_affinity: bool,
+        openai_cache_affinity: bool,
+    ) -> None:
+        """Проксирует WS-turn напрямую через HTTP SSE к FreeModel с failover по аккаунтам."""
+        proxy = cast(_WebSocketServiceProtocol, self)
+        _ = pending_requests, pending_lock
+        request_payload = dict(payload)
+        request_payload.pop("type", None)
+        request_payload.pop("client_metadata", None)
+        try:
+            responses_request = ResponsesRequest.model_validate(request_payload)
+        except Exception as exc:
+            await proxy._emit_websocket_terminal_error(
+                websocket,
+                client_send_lock=client_send_lock,
+                request_state=request_state,
+                error_code="invalid_request_error",
+                error_message=str(exc),
+                error_type="invalid_request_error",
+                downstream_activity=downstream_activity,
+            )
+            return
+
+        if request_payload.get("generate") is False:
+            await proxy._emit_websocket_freemodel_prewarm_completion(
+                websocket,
+                payload=request_payload,
+                client_send_lock=client_send_lock,
+                downstream_activity=downstream_activity,
+            )
+            return
+
+        terminal_types = frozenset(
+            {"response.completed", "response.failed", "response.incomplete", "error"},
+        )
+        try:
+            async for event_block in proxy._stream_with_retry(
+                responses_request,
+                headers,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=False,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=request_state.api_key_reservation,
+                suppress_text_done_events=False,
+                request_transport=_REQUEST_TRANSPORT_WEBSOCKET,
+                upstream_stream_transport_override="http",
+            ):
+                event_payload = parse_sse_data_json(event_block)
+                if event_payload is None:
+                    continue
+                text = json.dumps(event_payload, ensure_ascii=True, separators=(",", ":"))
+                try:
+                    await proxy._send_downstream_websocket_text(
+                        websocket,
+                        client_send_lock=client_send_lock,
+                        text=text,
+                        downstream_activity=downstream_activity,
+                    )
+                except Exception:
+                    downstream_activity.mark_disconnected()
+                    _facade().logger.debug(
+                        "Downstream websocket disconnected during freemodel HTTP relay",
+                        exc_info=True,
+                    )
+                    break
+                event_type = event_payload.get("type")
+                if isinstance(event_type, str) and event_type in terminal_types:
+                    break
+        except ProxyResponseError as exc:
+            error = _parse_openai_error(exc.payload)
+            await proxy._emit_websocket_terminal_error(
+                websocket,
+                client_send_lock=client_send_lock,
+                request_state=request_state,
+                error_code=_normalize_error_code(
+                    error.code if error else None,
+                    error.type if error else None,
+                )
+                or "upstream_error",
+                error_message=(error.message if error and error.message else str(exc)),
+                error_type=(error.type if error and error.type else "server_error"),
+                error_param=error.param if error else None,
+                downstream_activity=downstream_activity,
+            )
+        except Exception:
+            _facade().logger.warning(
+                "FreeModel HTTP websocket relay failed request_id=%s",
+                request_state.request_id,
+                exc_info=True,
+            )
+            await proxy._emit_websocket_terminal_error(
+                websocket,
+                client_send_lock=client_send_lock,
+                request_state=request_state,
+                error_code="upstream_error",
+                error_message="Proxy streaming failed",
+                downstream_activity=downstream_activity,
+            )
 
     async def _refresh_websocket_api_key_policy(self, api_key: ApiKeyData | None) -> ApiKeyData | None:
         proxy = cast(_WebSocketServiceProtocol, self)

@@ -6,6 +6,7 @@ import {
   exportAccountAuth,
   getAccountTrends,
   importAccount,
+  importFreemodelKey,
   listAccounts,
   pauseAccount,
   reactivateAccount,
@@ -36,6 +37,21 @@ export function useAccountMutations() {
     },
     onError: (error: Error) => {
       toast.error(error.message || "Import failed");
+    },
+  });
+
+  const importFreemodelMutation = useMutation({
+    mutationFn: ({ apiKey, label }: { apiKey: string; label?: string }) =>
+      importFreemodelKey(apiKey, label),
+    onSuccess: () => {
+      toast.success("FreeModel key added");
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "FreeModel import failed");
     },
   });
 
@@ -179,6 +195,7 @@ export function useAccountMutations() {
 
   return {
     importMutation,
+    importFreemodelMutation,
     pauseMutation,
     resumeMutation,
     setAliasMutation,

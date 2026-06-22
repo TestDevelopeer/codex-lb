@@ -29,6 +29,7 @@ describe("AccountList", () => {
             email: "primary@example.com",
             displayName: "Primary",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             additionalQuotas: [],
@@ -38,6 +39,7 @@ describe("AccountList", () => {
             email: "secondary@example.com",
             displayName: "Secondary",
             planType: "pro",
+            provider: "openai",
             status: "paused",
             limitWarmupEnabled: false,
             additionalQuotas: [],
@@ -47,6 +49,7 @@ describe("AccountList", () => {
         onSelect={onSelect}
         onOpenImport={() => {}}
         onOpenOauth={() => {}}
+        onOpenFreemodel={() => {}}
       />,
     );
 
@@ -75,6 +78,7 @@ describe("AccountList", () => {
             email: "hidden-early@example.com",
             displayName: "Hidden Early",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             usage: {
@@ -92,6 +96,7 @@ describe("AccountList", () => {
             email: "visible-early@example.com",
             displayName: "Visible Early",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             usage: {
@@ -109,6 +114,7 @@ describe("AccountList", () => {
         onSelect={() => {}}
         onOpenImport={() => {}}
         onOpenOauth={() => {}}
+        onOpenFreemodel={() => {}}
       />,
     );
 
@@ -128,6 +134,7 @@ describe("AccountList", () => {
             email: "stale@example.com",
             displayName: "Stale",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             usage: {
@@ -145,6 +152,7 @@ describe("AccountList", () => {
             email: "fresh@example.com",
             displayName: "Fresh",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             usage: {
@@ -162,6 +170,7 @@ describe("AccountList", () => {
         onSelect={() => {}}
         onOpenImport={() => {}}
         onOpenOauth={() => {}}
+        onOpenFreemodel={() => {}}
       />,
     );
 
@@ -179,6 +188,7 @@ describe("AccountList", () => {
             email: "late@example.com",
             displayName: "Late",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             usage: {
@@ -196,6 +206,7 @@ describe("AccountList", () => {
             email: "early@example.com",
             displayName: "Early",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             usage: {
@@ -213,6 +224,7 @@ describe("AccountList", () => {
         onSelect={() => {}}
         onOpenImport={() => {}}
         onOpenOauth={() => {}}
+        onOpenFreemodel={() => {}}
       />,
     );
 
@@ -230,6 +242,7 @@ describe("AccountList", () => {
             email: "z@example.com",
             displayName: "Zeta",
             planType: "pro",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:30:00.000Z",
@@ -240,6 +253,7 @@ describe("AccountList", () => {
             email: "a@example.com",
             displayName: "Alpha",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:10:00.000Z",
@@ -250,6 +264,7 @@ describe("AccountList", () => {
         onSelect={() => {}}
         onOpenImport={() => {}}
         onOpenOauth={() => {}}
+        onOpenFreemodel={() => {}}
         sortMode="name_asc"
         onSortModeChange={() => {}}
       />,
@@ -270,6 +285,7 @@ describe("AccountList", () => {
             email: "b@example.com",
             displayName: "Beta",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:10:00.000Z",
@@ -280,6 +296,7 @@ describe("AccountList", () => {
             email: "a@example.com",
             displayName: "Alpha",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:20:00.000Z",
@@ -290,6 +307,7 @@ describe("AccountList", () => {
         onSelect={() => {}}
         onOpenImport={() => {}}
         onOpenOauth={() => {}}
+        onOpenFreemodel={() => {}}
         sortMode="name_desc"
         onSortModeChange={() => {}}
       />,
@@ -310,6 +328,7 @@ describe("AccountList", () => {
             email: "a@example.com",
             displayName: "Alpha",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:10:00.000Z",
@@ -320,6 +339,7 @@ describe("AccountList", () => {
             email: "z@example.com",
             displayName: "Zeta",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:40:00.000Z",
@@ -330,6 +350,7 @@ describe("AccountList", () => {
         onSelect={() => {}}
         onOpenImport={() => {}}
         onOpenOauth={() => {}}
+        onOpenFreemodel={() => {}}
         sortMode="reset_latest"
         onSortModeChange={() => {}}
       />,
@@ -350,6 +371,7 @@ describe("AccountList", () => {
             email: "unknown@example.com",
             displayName: "Unknown",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             additionalQuotas: [],
@@ -359,6 +381,7 @@ describe("AccountList", () => {
             email: "stale@example.com",
             displayName: "Stale",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T11:30:00.000Z",
@@ -369,6 +392,7 @@ describe("AccountList", () => {
             email: "latest@example.com",
             displayName: "Latest",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:40:00.000Z",
@@ -379,6 +403,7 @@ describe("AccountList", () => {
             email: "earlier@example.com",
             displayName: "Earlier",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             resetAtPrimary: "2026-01-01T12:10:00.000Z",
@@ -389,6 +414,7 @@ describe("AccountList", () => {
         onSelect={() => {}}
         onOpenImport={() => {}}
         onOpenOauth={() => {}}
+        onOpenFreemodel={() => {}}
         sortMode="reset_latest"
         onSortModeChange={() => {}}
       />,
@@ -413,6 +439,7 @@ describe("AccountList", () => {
             email: "primary@example.com",
             displayName: "Primary",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             additionalQuotas: [],
@@ -422,6 +449,7 @@ describe("AccountList", () => {
         onSelect={() => {}}
         onOpenImport={() => {}}
         onOpenOauth={() => {}}
+        onOpenFreemodel={() => {}}
       />,
     );
 
@@ -441,6 +469,7 @@ describe("AccountList", () => {
             email: "primary@example.com",
             displayName: "Primary",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             additionalQuotas: [],
@@ -450,6 +479,7 @@ describe("AccountList", () => {
         onSelect={() => {}}
         onOpenImport={() => {}}
         onOpenOauth={() => {}}
+        onOpenFreemodel={() => {}}
       />,
     );
 
@@ -470,6 +500,7 @@ describe("AccountList", () => {
             email: "active@example.com",
             displayName: "Active",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             additionalQuotas: [],
@@ -479,6 +510,7 @@ describe("AccountList", () => {
             email: "reauth@example.com",
             displayName: "Needs Reauth",
             planType: "pro",
+            provider: "openai",
             status: "reauth_required",
             limitWarmupEnabled: false,
             additionalQuotas: [],
@@ -488,6 +520,7 @@ describe("AccountList", () => {
         onSelect={() => {}}
         onOpenImport={() => {}}
         onOpenOauth={() => {}}
+        onOpenFreemodel={() => {}}
       />,
     );
 
@@ -507,6 +540,7 @@ describe("AccountList", () => {
             email: "dup@example.com",
             displayName: "Same email, different workspace",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             isEmailDuplicate: false,
@@ -517,6 +551,7 @@ describe("AccountList", () => {
             email: "dup@example.com",
             displayName: "Same email, duplicate slot",
             planType: "plus",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             isEmailDuplicate: true,
@@ -527,6 +562,7 @@ describe("AccountList", () => {
             email: "unique@example.com",
             displayName: "Unique",
             planType: "pro",
+            provider: "openai",
             status: "active",
             limitWarmupEnabled: false,
             additionalQuotas: [],
@@ -536,6 +572,7 @@ describe("AccountList", () => {
         onSelect={() => {}}
         onOpenImport={() => {}}
         onOpenOauth={() => {}}
+        onOpenFreemodel={() => {}}
       />,
     );
 

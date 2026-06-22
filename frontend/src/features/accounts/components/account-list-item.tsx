@@ -43,7 +43,9 @@ export function AccountListItem({
     : null;
   const workspaceLabel = account.chatgptAccountId || account.workspaceLabel || account.workspaceId || "Personal / unknown workspace";
   const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
-  const slotSubtitle = `${formatSlug(account.planType)} | ${workspaceLabel}${seatLabel}`;
+  const slotSubtitle = account.provider === "freemodel"
+    ? "FreeModel API key"
+    : `${formatSlug(account.planType)} | ${workspaceLabel}${seatLabel}`;
   const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
   const primary = account.usage?.primaryRemainingPercent ?? null;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
@@ -72,6 +74,10 @@ export function AccountListItem({
   const warmupMeta = account.limitWarmup
     ? `${formatSlug(account.limitWarmup.status)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
     : "No attempts";
+  const blockedResetLabel =
+    (account.status === "rate_limited" || account.status === "quota_exceeded") && account.statusResetAt
+      ? formatQuotaResetLabel(account.statusResetAt)
+      : null;
 
   return (
     <button
@@ -95,6 +101,11 @@ export function AccountListItem({
             {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span> | {slotSubtitle}{idSuffix}</> : <>{slotSubtitle}{idSuffix}</>}
           </p>
         </div>
+        {account.provider === "freemodel" ? (
+          <Badge variant="outline" className="shrink-0 text-[10px] uppercase tracking-wide">
+            FreeModel
+          </Badge>
+        ) : null}
         {showRoutingPolicy ? (
           <RoutingPolicyBadge
             policy={account.routingPolicy as AccountRoutingPolicy | undefined}
@@ -140,6 +151,11 @@ export function AccountListItem({
         <span>{warmupLabel}</span>
         <span className="truncate">{warmupMeta}</span>
       </div>
+      {blockedResetLabel ? (
+        <div className="mt-1 text-[10px] text-muted-foreground">
+          Available {blockedResetLabel}
+        </div>
+      ) : null}
     </button>
   );
 }

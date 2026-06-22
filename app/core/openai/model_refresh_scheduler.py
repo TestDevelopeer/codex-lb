@@ -242,13 +242,15 @@ async def _fetch_models_with_transport_recovery(
     transport_recovery: _TransportRecoveryState,
 ) -> list[UpstreamModel]:
     access_token = encryptor.decrypt(account.access_token_encrypted)
-    account_id = account.chatgpt_account_id
+    provider = getattr(account, "provider", None) or "openai"
+    account_id = account.chatgpt_account_id if provider != "freemodel" else None
     route = await _resolve_upstream_route_for_account(account, operation="model_discovery")
 
     try:
         return await fetch_models_for_plan(
             access_token,
             account_id,
+            provider=provider,
             route=route,
             allow_direct_egress=route is None,
         )
@@ -259,11 +261,13 @@ async def _fetch_models_with_transport_recovery(
         await _refresh_http_client_after_transport_error(account, exc)
         transport_recovery.attempted = True
         access_token = encryptor.decrypt(account.access_token_encrypted)
-        account_id = account.chatgpt_account_id
+        provider = getattr(account, "provider", None) or "openai"
+        account_id = account.chatgpt_account_id if provider != "freemodel" else None
         route = await _resolve_upstream_route_for_account(account, operation="model_discovery")
         return await fetch_models_for_plan(
             access_token,
             account_id,
+            provider=provider,
             route=route,
             allow_direct_egress=route is None,
         )

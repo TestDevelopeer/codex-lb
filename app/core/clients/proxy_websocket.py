@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol, cast
 from urllib.parse import urlparse, urlunparse
+from uuid import uuid4
 
 import aiohttp
 from websockets.asyncio.client import ClientConnection
@@ -27,7 +29,9 @@ from app.core.clients.codex import (
     create_codex_session,
     require_route_or_direct_egress_opt_in,
 )
-from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
+from app.core.clients.proxy import ProxyResponseError, _build_upstream_headers, filter_inbound_headers
+from app.core.providers import get_endpoint_for_provider
+from app.core.utils.sse import parse_sse_data_json
 from app.core.config.settings import get_settings
 from app.core.conversation_archive import archive_bytes, archive_text
 from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, openai_error
@@ -49,6 +53,7 @@ _WEBSOCKET_HOP_BY_HOP_HEADERS = {
     "upgrade",
 }
 _RESPONSES_WEBSOCKET_BETA_HEADER = "responses_websockets=2026-02-06"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -286,6 +291,166 @@ class ArchivingResponsesWebSocket:
         return self._wrapped.response_header(name)
 
 
+class HttpSseResponsesUpstream:
+    """HTTP SSE-адаптер upstream для провайдеров без WebSocket (FreeModel).
+
+    HTTP-bridge ожидает постоянное upstream-соединение с ``send_text``/``receive``.
+    Для FreeModel каждый ``response.create`` выполняется отдельным HTTP POST, а события
+    SSE транслируются в очередь как JSON-текстовые кадры, совместимые с WS-bridge.
+    """
+
+    def __init__(
+        self,
+        *,
+        headers: Mapping[str, str],
+        access_token: str,
+        account_id: str | None,
+        provider: str,
+        route: ResolvedUpstreamRoute | None,
+        allow_direct_egress: bool,
+    ) -> None:
+        self._headers = dict(headers)
+        self._access_token = access_token
+        self._account_id = account_id
+        self._provider = provider
+        self._route = route
+        self._allow_direct_egress = allow_direct_egress
+        self._queue: asyncio.Queue[UpstreamWebSocketMessage] = asyncio.Queue()
+        self._send_lock = asyncio.Lock()
+        self._closed = False
+        self._active_tasks: set[asyncio.Task[None]] = set()
+        self.upstream_proxy_route_mode = route.mode if route is not None else ("direct" if allow_direct_egress else None)
+        self.upstream_proxy_pool_id = route.pool_id if route is not None else None
+        self.upstream_proxy_endpoint_id = route.endpoint_id if route is not None else None
+        self.upstream_proxy_fallback_used = None
+
+    async def send_text(self, text: str) -> None:
+        async with self._send_lock:
+            if self._closed:
+                raise RuntimeError("Upstream HTTP bridge session is closed")
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError as exc:
+                await self._enqueue_json_event(
+                    {
+                        "type": "error",
+                        "error": {
+                            "code": "invalid_request_error",
+                            "message": f"Invalid response.create JSON: {exc}",
+                            "type": "invalid_request_error",
+                        },
+                    }
+                )
+                return
+            if payload.get("generate") is False:
+                await self._enqueue_prewarm_events(payload)
+                return
+            task = asyncio.create_task(self._stream_request(payload))
+            self._active_tasks.add(task)
+            task.add_done_callback(self._active_tasks.discard)
+
+    async def send_bytes(self, data: bytes) -> None:
+        raise RuntimeError("Binary upstream frames are not supported for HTTP SSE providers")
+
+    async def receive(self) -> UpstreamWebSocketMessage:
+        if self._closed and self._queue.empty():
+            return UpstreamWebSocketMessage(kind="close")
+        return await self._queue.get()
+
+    async def close(self) -> None:
+        self._closed = True
+        for task in list(self._active_tasks):
+            task.cancel()
+        if self._active_tasks:
+            await asyncio.gather(*self._active_tasks, return_exceptions=True)
+
+    def response_header(self, name: str) -> str | None:
+        return None
+
+    async def _enqueue_json_event(self, payload: Mapping[str, Any]) -> None:
+        text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+        await self._queue.put(UpstreamWebSocketMessage(kind="text", text=text))
+
+    async def _enqueue_prewarm_events(self, payload: Mapping[str, Any]) -> None:
+        # FreeModel не поддерживает ChatGPT prewarm (generate=false) по WS; синтезируем
+        # минимальный terminal-ответ, чтобы http-bridge мог продолжить сессию.
+        response_id = f"resp_prewarm_{uuid4().hex}"
+        model = payload.get("model")
+        response_body: dict[str, Any] = {
+            "id": response_id,
+            "object": "response",
+            "status": "completed",
+            "output": [],
+        }
+        if isinstance(model, str):
+            response_body["model"] = model
+        await self._enqueue_json_event({"type": "response.created", "response": dict(response_body)})
+        await self._enqueue_json_event({"type": "response.completed", "response": dict(response_body)})
+
+    async def _stream_request(self, raw_payload: Mapping[str, Any]) -> None:
+        from app.core.clients.proxy import stream_responses
+        from app.core.openai.requests import ResponsesRequest
+
+        request_payload = dict(raw_payload)
+        request_payload.pop("type", None)
+        request_payload.pop("client_metadata", None)
+        try:
+            request = ResponsesRequest.model_validate(request_payload)
+        except Exception as exc:
+            await self._enqueue_json_event(
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "invalid_request_error",
+                        "message": str(exc),
+                        "type": "invalid_request_error",
+                    },
+                }
+            )
+            return
+
+        try:
+            async for event_block in stream_responses(
+                request,
+                self._headers,
+                self._access_token,
+                self._account_id,
+                raise_for_status=True,
+                route=self._route,
+                allow_direct_egress=self._allow_direct_egress,
+                provider=self._provider,
+            ):
+                payload = parse_sse_data_json(event_block)
+                if payload is None:
+                    continue
+                await self._enqueue_json_event(payload)
+        except ProxyResponseError as exc:
+            error = exc.payload.get("error") if isinstance(exc.payload, dict) else None
+            if isinstance(error, dict):
+                await self._enqueue_json_event({"type": "error", "error": error})
+            else:
+                await self._enqueue_json_event(
+                    {
+                        "type": "error",
+                        "error": {
+                            "code": "upstream_error",
+                            "message": str(exc),
+                            "type": "server_error",
+                        },
+                    }
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("HTTP SSE upstream stream failed provider=%s", self._provider, exc_info=True)
+            await self._queue.put(
+                UpstreamWebSocketMessage(
+                    kind="error",
+                    error="HTTP SSE upstream stream failed before response.completed",
+                )
+            )
+
+
 def filter_inbound_websocket_headers(headers: dict[str, str]) -> dict[str, str]:
     filtered = filter_inbound_headers(headers)
     return {key: value for key, value in filtered.items() if key.lower() not in _WEBSOCKET_HOP_BY_HOP_HEADERS}
@@ -347,7 +512,40 @@ async def connect_responses_websocket(
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
+    provider: str | None = None,
 ) -> UpstreamResponsesWebSocket:
+    endpoint = get_endpoint_for_provider(provider)
+    if endpoint.transport == "http":
+        require_route_or_direct_egress_opt_in(
+            route=route,
+            allow_direct_egress=allow_direct_egress,
+            operation="responses stream",
+        )
+        upstream_base = (base_url or endpoint.base_url).rstrip("/")
+        url = f"{upstream_base}{endpoint.responses_path}"
+        upstream_headers = _build_upstream_headers(
+            headers,
+            access_token,
+            account_id,
+            needs_account_id_header=endpoint.needs_account_id_header,
+        )
+        wrapped = HttpSseResponsesUpstream(
+            headers=headers,
+            access_token=access_token,
+            account_id=account_id,
+            provider=provider or "freemodel",
+            route=route,
+            allow_direct_egress=allow_direct_egress,
+        )
+        return ArchivingResponsesWebSocket(
+            wrapped,
+            url=url,
+            headers=upstream_headers,
+            account_id=account_id,
+            route=route,
+            direct_egress=allow_direct_egress,
+        )
+
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = _responses_websocket_url(upstream_base)

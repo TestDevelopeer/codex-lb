@@ -14,7 +14,6 @@ from app.core.clients.codex import (
 )
 from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import lease_http_session
-from app.core.config.settings import get_settings
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
@@ -101,18 +100,49 @@ def _parse_upstream_model(data: dict[str, JsonValue]) -> UpstreamModel:
     )
 
 
+def _parse_v1_model_entry(data: dict[str, JsonValue]) -> UpstreamModel | None:
+    model_id = data.get("id")
+    if not isinstance(model_id, str) or not model_id:
+        return None
+    return UpstreamModel(
+        slug=model_id,
+        display_name=_str(data, "id", model_id),
+        description="",
+        context_window=0,
+        input_modalities=(),
+        supported_reasoning_levels=(),
+        default_reasoning_level=None,
+        supports_reasoning_summaries=False,
+        support_verbosity=False,
+        default_verbosity=None,
+        prefer_websockets=False,
+        supports_parallel_tool_calls=False,
+        supported_in_api=True,
+        minimal_client_version=None,
+        priority=0,
+        available_in_plans=frozenset({"freemodel"}),
+        raw=dict(data),
+    )
+
+
 async def fetch_models_for_plan(
     access_token: str,
     account_id: str | None,
     *,
+    provider: str | None = None,
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
 ) -> list[UpstreamModel]:
-    settings = get_settings()
-    upstream_base = settings.upstream_base_url.rstrip("/")
-    client_version = await get_codex_version_cache().get_version()
-    url = f"{upstream_base}/codex/models?client_version={client_version}"
+    from app.core.providers import get_endpoint_for_provider
+
+    endpoint = get_endpoint_for_provider(provider)
+    upstream_base = endpoint.base_url.rstrip("/")
+    if endpoint.models_query_param:
+        client_version = await get_codex_version_cache().get_version()
+        url = f"{upstream_base}{endpoint.models_path}?{endpoint.models_query_param}={client_version}"
+    else:
+        url = f"{upstream_base}{endpoint.models_path}"
     require_route_or_direct_egress_opt_in(
         route=route,
         allow_direct_egress=allow_direct_egress,
@@ -123,7 +153,7 @@ async def fetch_models_for_plan(
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/json",
     }
-    if account_id:
+    if endpoint.needs_account_id_header and account_id:
         headers["chatgpt-account-id"] = account_id
 
     try:
@@ -169,6 +199,24 @@ async def fetch_models_for_plan(
         raise ModelFetchError(502, "Invalid response format from upstream models API")
 
     data_object = cast(dict[str, object], data)
+    if endpoint.parse_models_as_data_list:
+        models_raw = data_object.get("data")
+        if not isinstance(models_raw, list):
+            raise ModelFetchError(502, "Missing 'data' key in upstream response")
+        result: list[UpstreamModel] = []
+        for entry in models_raw:
+            if not isinstance(entry, dict):
+                continue
+            entry_data = cast(dict[str, JsonValue], entry)
+            try:
+                parsed = _parse_v1_model_entry(entry_data)
+            except Exception:
+                logger.warning("Failed to parse upstream v1 model entry", exc_info=True)
+                continue
+            if parsed is not None:
+                result.append(parsed)
+        return result
+
     models_raw = data_object.get("models")
     if not isinstance(models_raw, list):
         raise ModelFetchError(502, "Missing 'models' key in upstream response")

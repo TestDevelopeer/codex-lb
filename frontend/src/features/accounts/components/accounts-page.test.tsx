@@ -60,6 +60,7 @@ function account(overrides: Partial<AccountSummary>): AccountSummary {
     email: "default@example.com",
     displayName: "Default",
     planType: "plus",
+    provider: "openai",
     status: "active",
     additionalQuotas: [],
     limitWarmupEnabled: false,
