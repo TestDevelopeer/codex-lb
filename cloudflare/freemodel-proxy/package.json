@@ -1,0 +1,16 @@
+{
+  "name": "freemodel-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker reverse proxy for the FreeModel provider, used by codex-lb.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "test": "node --test test/"
+  },
+  "devDependencies": {
+    "wrangler": "^3.78.0"
+  }
+}

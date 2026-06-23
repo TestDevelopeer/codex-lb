@@ -1,0 +1,19 @@
+name = "freemodel-proxy"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+# Operator-configurable upstream origin. Defaults to the public FreeModel
+# API. Override only if you proxy to a different FreeModel-compatible
+# endpoint.
+[vars]
+FREEMODEL_ORIGIN = "https://api.freemodel.dev"
+
+# Secrets — DO NOT commit values. Set via the Wrangler CLI:
+#   npx wrangler secret put WORKER_PROXY_TOKEN
+#
+# When WORKER_PROXY_TOKEN is set, inbound requests MUST carry a matching
+# X-Worker-Token header or the Worker returns 401. codex-lb injects this
+# header when CODEX_LB_FREEMODEL_WORKER_TOKEN is configured.
+#
+# Optional (used only by the contract tests):
+#   npx wrangler secret put TEST_ORIGIN_TOKEN

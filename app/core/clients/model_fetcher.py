@@ -14,6 +14,7 @@ from app.core.clients.codex import (
 )
 from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import lease_http_session
+from app.core.clients.proxy import _maybe_apply_freemodel_worker_token
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
@@ -134,7 +135,7 @@ async def fetch_models_for_plan(
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
 ) -> list[UpstreamModel]:
-    from app.core.providers import get_endpoint_for_provider
+    from app.core.providers import get_endpoint_for_provider, is_freemodel
 
     endpoint = get_endpoint_for_provider(provider)
     upstream_base = endpoint.base_url.rstrip("/")
@@ -155,6 +156,8 @@ async def fetch_models_for_plan(
     }
     if endpoint.needs_account_id_header and account_id:
         headers["chatgpt-account-id"] = account_id
+    if is_freemodel(provider):
+        _maybe_apply_freemodel_worker_token(headers)
 
     try:
         if route is not None:

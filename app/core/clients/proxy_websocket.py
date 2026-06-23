@@ -30,7 +30,7 @@ from app.core.clients.codex import (
     require_route_or_direct_egress_opt_in,
 )
 from app.core.clients.proxy import ProxyResponseError, _build_upstream_headers, filter_inbound_headers
-from app.core.providers import get_endpoint_for_provider
+from app.core.providers import get_endpoint_for_provider, is_freemodel
 from app.core.utils.sse import parse_sse_data_json
 from app.core.config.settings import get_settings
 from app.core.conversation_archive import archive_bytes, archive_text
@@ -528,6 +528,7 @@ async def connect_responses_websocket(
             access_token,
             account_id,
             needs_account_id_header=endpoint.needs_account_id_header,
+            is_freemodel=is_freemodel(provider),
         )
         wrapped = HttpSseResponsesUpstream(
             headers=headers,
