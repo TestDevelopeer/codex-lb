@@ -2491,7 +2491,7 @@ def _compact_response_output_item(payload: CompactResponsePayload) -> dict[str, 
                 continue
             item_type = item.get("type")
             encrypted_content = item.get("encrypted_content")
-            if isinstance(item_type, str) and item_type in {"compaction", "compaction_summary"}:
+            if isinstance(item_type, str) and item_type in {"compaction", "compaction_summary", "reasoning"}:
                 if isinstance(encrypted_content, str):
                     return {
                         "type": "compaction",

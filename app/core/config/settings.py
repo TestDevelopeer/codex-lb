@@ -157,6 +157,13 @@ class Settings(BaseSettings):
     # Базовый URL OpenAI-совместимого провайдера FreeModel для аккаунтов с
     # ``provider = freemodel``. Запросы к таким аккаунтам идут на ``/v1/*``.
     freemodel_base_url: str = "https://api.freemodel.dev"
+    # Общий секрет для Cloudflare Worker reverse-proxy (см.
+    # ``cloudflare/freemodel-proxy``). Когда задан и ``freemodel_base_url``
+    # указывает на Worker, кодекс-LB добавляет заголовок ``X-Worker-Token``
+    # с этим значением к каждому запросу к FreeModel. Когда ``None`` —
+    # заголовок не добавляется (поведение по умолчанию, прямой ход к
+    # ``api.freemodel.dev``).
+    freemodel_worker_token: str | None = None
     upstream_stream_transport: Literal["http", "websocket", "auto"] = "auto"
     upstream_connect_timeout_seconds: float = 8.0
     upstream_compact_timeout_seconds: float | None = None

@@ -45,6 +45,7 @@ from app.core.clients.codex import (
 )
 from app.core.clients.http import acquire_http_client, lease_http_session
 from app.core.config.settings import Settings, get_settings
+from app.core.providers import is_freemodel
 from app.core.conversation_archive import archive_json, archive_text
 from app.core.errors import (
     OpenAIErrorDetail,
@@ -467,6 +468,19 @@ def filter_inbound_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in headers.items() if not _should_drop_inbound_header(key)}
 
 
+def _maybe_apply_freemodel_worker_token(headers: dict[str, str]) -> None:
+    """Attach the ``X-Worker-Token`` header for FreeModel upstream requests.
+
+    Only applies when the operator has configured an operator-owned
+    Cloudflare Worker reverse proxy (see ``cloudflare/freemodel-proxy``)
+    via ``CODEX_LB_FREEMODEL_WORKER_TOKEN``. When the token is unset the
+    header is omitted so the default direct-origin path is unaffected.
+    """
+    worker_token = get_settings().freemodel_worker_token
+    if worker_token:
+        headers["X-Worker-Token"] = worker_token
+
+
 def _build_upstream_headers(
     inbound: Mapping[str, str],
     access_token: str,
@@ -474,6 +488,7 @@ def _build_upstream_headers(
     accept: str = "text/event-stream",
     *,
     needs_account_id_header: bool = True,
+    is_freemodel: bool = False,
 ) -> dict[str, str]:
     headers = dict(inbound)
     lower_keys = {key.lower() for key in headers}
@@ -486,6 +501,8 @@ def _build_upstream_headers(
     headers["Content-Type"] = "application/json"
     if needs_account_id_header and account_id:
         headers["chatgpt-account-id"] = account_id
+    if is_freemodel:
+        _maybe_apply_freemodel_worker_token(headers)
     return headers
 
 
@@ -498,6 +515,7 @@ def _build_upstream_transcribe_headers(
     account_id: str | None,
     *,
     needs_account_id_header: bool = True,
+    is_freemodel: bool = False,
 ) -> dict[str, str]:
     # Minimal header set matching Codex CLI ``/transcribe`` fingerprint.
     # Omit Accept, x-request-id, and bulk-forwarded inbound headers to
@@ -512,6 +530,8 @@ def _build_upstream_transcribe_headers(
             headers[key] = value
         elif lower.startswith(_TRANSCRIBE_FORWARD_HEADER_PREFIXES):
             headers[key] = value
+    if is_freemodel:
+        _maybe_apply_freemodel_worker_token(headers)
     return headers
 
 
@@ -521,6 +541,7 @@ def _build_upstream_websocket_headers(
     account_id: str | None,
     *,
     needs_account_id_header: bool = True,
+    is_freemodel: bool = False,
 ) -> dict[str, str]:
     connected_header_tokens: set[str] = set()
     for key, value in inbound.items():
@@ -539,6 +560,8 @@ def _build_upstream_websocket_headers(
     headers["Authorization"] = f"Bearer {access_token}"
     if needs_account_id_header and account_id:
         headers["chatgpt-account-id"] = account_id
+    if is_freemodel:
+        _maybe_apply_freemodel_worker_token(headers)
     return headers
 
 
@@ -2203,6 +2226,7 @@ async def _stream_responses_with_session(
     from app.core.providers import get_endpoint_for_provider
 
     endpoint = get_endpoint_for_provider(provider)
+    upstream_is_freemodel = is_freemodel(provider)
     upstream_base = (base_url or endpoint.base_url).rstrip("/")
     url = f"{upstream_base}{endpoint.responses_path}"
     require_route_or_direct_egress_opt_in(
@@ -2279,6 +2303,7 @@ async def _stream_responses_with_session(
             access_token,
             account_id,
             needs_account_id_header=endpoint.needs_account_id_header,
+            is_freemodel=upstream_is_freemodel,
         )
         method = "GET"
     else:
@@ -2287,6 +2312,7 @@ async def _stream_responses_with_session(
             access_token,
             account_id,
             needs_account_id_header=endpoint.needs_account_id_header,
+            is_freemodel=upstream_is_freemodel,
         )
         method = "POST"
     remaining_request_timeout = _remaining_total_timeout(
@@ -2512,6 +2538,7 @@ async def _stream_responses_with_session(
             access_token,
             account_id,
             needs_account_id_header=endpoint.needs_account_id_header,
+            is_freemodel=upstream_is_freemodel,
         )
         method = "POST"
         remaining_request_timeout = _remaining_total_timeout(
@@ -2931,6 +2958,7 @@ class _CompactCommandTransport:
         from app.core.providers import get_endpoint_for_provider
 
         endpoint = get_endpoint_for_provider(self.provider)
+        upstream_is_freemodel = is_freemodel(self.provider)
         upstream_base = endpoint.base_url.rstrip("/")
         if endpoint.compact_path is None:
             if not endpoint.compact_uses_responses_path:
@@ -2962,6 +2990,7 @@ class _CompactCommandTransport:
             self.account_id,
             accept="application/json",
             needs_account_id_header=endpoint.needs_account_id_header,
+            is_freemodel=upstream_is_freemodel,
         )
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
@@ -3834,6 +3863,7 @@ async def _transcribe_audio_with_session(
     from app.core.providers import get_endpoint_for_provider
 
     endpoint = get_endpoint_for_provider(provider)
+    upstream_is_freemodel = is_freemodel(provider)
     upstream_base = (base_url or endpoint.base_url).rstrip("/")
     url = f"{upstream_base}{endpoint.transcribe_path}"
     upstream_headers = _build_upstream_transcribe_headers(
@@ -3841,6 +3871,7 @@ async def _transcribe_audio_with_session(
         access_token,
         account_id,
         needs_account_id_header=endpoint.needs_account_id_header,
+        is_freemodel=upstream_is_freemodel,
     )
 
     effective_total_timeout = _effective_transcribe_total_timeout(

@@ -39,6 +39,28 @@ def test_compact_response_output_item_accepts_modeled_output_field() -> None:
     }
 
 
+def test_compact_response_output_item_accepts_reasoning_output_field() -> None:
+    class ModeledCompactPayload(CompactResponsePayload):
+        output: list[dict[str, JsonValue]] | None = None
+
+    payload = ModeledCompactPayload.model_validate(
+        {
+            "object": "response.compaction",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "encrypted_content": "REASONING_CONTEXT",
+                }
+            ],
+        }
+    )
+
+    assert proxy_api_module._compact_response_output_item(payload) == {
+        "type": "compaction",
+        "encrypted_content": "REASONING_CONTEXT",
+    }
+
+
 def test_compact_response_id_generates_unique_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proxy_api_module, "get_request_id", lambda: None)
     payload = CompactResponsePayload.model_validate({"object": "response.compaction"})

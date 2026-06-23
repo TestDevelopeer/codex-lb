@@ -2418,6 +2418,14 @@ def _make_account(account_id: str) -> Account:
     )
 
 
+async def _call_with_supported_optional_kwargs_for_tests(
+    func: Callable[..., Any],
+    *args: object,
+    optional_kwargs: Mapping[str, object],
+) -> Any:
+    return await func(*args, **optional_kwargs)
+
+
 def _install_two_account_selection(
     monkeypatch: pytest.MonkeyPatch,
     service: proxy_service.ProxyService,
@@ -10106,6 +10114,106 @@ async def test_prepare_websocket_response_create_request_trims_codex_session_ful
     fresh_payload = json.loads(prepared.request_state.fresh_upstream_request_text)
     assert "previous_response_id" not in fresh_payload
     assert fresh_payload["input"] == [*historical_input, new_input]
+
+
+@pytest.mark.asyncio
+async def test_freemodel_websocket_http_relay_prefers_safe_fresh_request_text(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    captured: dict[str, ResponsesRequest] = {}
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_fm_ws_safe_replay",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text=(
+            '{"type":"response.create","model":"gpt-5.1","previous_response_id":"resp_prev_ws_v2",'
+            '"input":[{"role":"user","content":[{"type":"input_text","text":"delta"}]}]}'
+        ),
+        previous_response_id="resp_prev_ws_v2",
+        fresh_upstream_request_text=(
+            '{"model":"gpt-5.1","input":[{"role":"user","content":[{"type":"input_text","text":"delta"}]}]}'
+        ),
+        fresh_upstream_request_is_retry_safe=True,
+    )
+
+    async def fake_stream_with_retry(
+        payload: ResponsesRequest,
+        headers: Mapping[str, str],
+        **kwargs: object,
+    ):
+        del headers, kwargs
+        captured["payload"] = payload
+        yield 'data: {"type":"response.completed","response":{"id":"resp_done"}}\n\n'
+
+    monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
+    monkeypatch.setattr(service, "_send_downstream_websocket_text", AsyncMock())
+
+    await service._stream_websocket_turn_via_freemodel_http(
+        cast(WebSocket, SimpleNamespace()),
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "previous_response_id": "resp_prev_ws_v2",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "delta"}]}],
+        },
+        request_state,
+        headers={"session_id": "sid-fm-safe"},
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        response_create_gate=asyncio.Semaphore(1),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+    )
+
+    forwarded = captured["payload"]
+    assert forwarded.previous_response_id is None
+
+
+@pytest.mark.asyncio
+async def test_warmup_request_propagates_freemodel_provider(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_freemodel_warmup")
+    account.provider = "freemodel"
+    account.chatgpt_account_id = None
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_handle_proxy_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_call_with_supported_optional_kwargs", _call_with_supported_optional_kwargs_for_tests)
+
+    async def fake_compact(
+        payload: ResponsesCompactRequest,
+        headers: Mapping[str, str],
+        access_token: str,
+        account_id: str | None,
+        *,
+        provider: str | None = None,
+    ) -> CompactResponsePayload:
+        del payload, headers, access_token
+        seen["account_id"] = account_id
+        seen["provider"] = provider
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    result = await service._submit_warmup_request(
+        account=proxy_service._snapshot_warmup_account(account),
+        api_key=None,
+        headers={"user-agent": "pytest"},
+        warmup_model="gpt-5.1",
+    )
+
+    assert result.success is True
+    assert seen == {"account_id": None, "provider": "freemodel"}
 
 
 @pytest.mark.asyncio

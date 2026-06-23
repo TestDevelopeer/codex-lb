@@ -2173,9 +2173,17 @@ class _WebSocketMixin:
         """Проксирует WS-turn напрямую через HTTP SSE к FreeModel с failover по аккаунтам."""
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = pending_requests, pending_lock
-        request_payload = dict(payload)
-        request_payload.pop("type", None)
-        request_payload.pop("client_metadata", None)
+        if request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text:
+            try:
+                request_payload = json.loads(request_state.fresh_upstream_request_text)
+            except json.JSONDecodeError:
+                request_payload = dict(payload)
+                request_payload.pop("type", None)
+                request_payload.pop("client_metadata", None)
+        else:
+            request_payload = dict(payload)
+            request_payload.pop("type", None)
+            request_payload.pop("client_metadata", None)
         try:
             responses_request = ResponsesRequest.model_validate(request_payload)
         except Exception as exc:
